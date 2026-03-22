@@ -3,17 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
-try:
+if TYPE_CHECKING:
     from typing import NotRequired, TypeAlias
-except ImportError:  # pragma: no cover - Python < 3.11 runtime compatibility
-    class _NotRequiredCompat:
-        def __class_getitem__(cls, item):
-            return item
-
-    NotRequired = _NotRequiredCompat  # type: ignore[assignment]
-    TypeAlias = object  # type: ignore[assignment]
 
 
 class MessageType(IntEnum):

@@ -86,8 +86,17 @@ def _clear_credentials_sync(token_path: str | Path | None) -> None:
 
 
 def _print_qr_instructions(url: str) -> None:
-    _log("在微信中打开以下链接完成登录:")
-    sys.stderr.write(f"{url}\n")
+    import qrcode
+
+    try:
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(tty=False)
+        print("请使用微信扫描上方二维码完成登录。")
+    except Exception:
+        _log("在微信中打开以下链接完成登录:")
+        sys.stderr.write(f"{url}\n")
 
 
 async def load_credentials(token_path: str | Path | None = None) -> Credentials | None:
