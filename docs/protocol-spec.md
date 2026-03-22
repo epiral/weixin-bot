@@ -1,48 +1,43 @@
-# 微信 iLink Bot API 协议技术文档
+# 微信 iLink Bot API 通信协议规范
 
-本文基于仓库根目录的 `PROTOCOL.md` 摘要，以及上游实现中的实际类型定义、HTTP 封装、登录流程、消息收发、CDN 上传下载和 session 管理逻辑整理而成。文档目标不是描述某个 UI，而是给 SDK / 客户端实现者一份可直接落地的线协议说明。
+> 适用对象：实现微信 iLink Bot / ClawBot 协议的 SDK、网关和独立 Bot。
+>
+> 整理依据：仓库根目录 `PROTOCOL.md`、腾讯官方 `@tencent-weixin/openclaw-weixin` v1.0.2 源码、`m1heng/claude-plugin-weixin`、`hao-ji-xing/openclaw-weixin` 示例实现。
+>
+> 说明：文中标注“工程建议”的内容来自现有客户端实现经验，用于提高兼容性；它们不是服务端返回字段本身的一部分。
 
 ## 1. 概述
 
-微信 iLink Bot API 是一套“HTTP JSON 控制面 + CDN 二进制媒体面”的协议：
-
-- 登录通过二维码完成。
-- 消息接收通过 `getupdates` 长轮询完成。
-- 消息发送通过 `sendmessage` 完成。
-- Typing 状态通过 `getconfig` + `sendtyping` 完成。
-- 媒体文件通过 `getuploadurl` 获取上传参数，再走微信 CDN 上传/下载。
-
-默认地址如下：
-
-- API Base URL: `https://ilinkai.weixin.qq.com`
-- CDN Base URL: `https://novac2c.cdn.weixin.qq.com/c2c`
-
-核心特点如下：
-
-- 认证结果是 `bot_token`，后续所有 CGI `POST` 请求都用 `Authorization: Bearer ...`。
-- 所有 CGI `POST` 请求都携带 `base_info`，当前已观测到的字段只有 `channel_version`。
-- 入站消息里会带 `context_token`，回复时必须原样回传，否则消息无法挂到正确会话上下文。
-- 媒体文件使用 AES-128-ECB + PKCS7 填充加密，CDN 上传和下载都围绕 `encrypt_query_param` / `upload_param` 这类 opaque token 运作。
-- 登录完成时服务端会返回 `baseurl`，后续请求应优先使用该值，而不是硬编码默认 API Base URL。
-
-当前实现中固定使用的 `bot_type` 是 `3`。
+微信 iLink Bot API 是腾讯微信 ClawBot 功能背后的 HTTP/JSON 协议。主业务基座地址是 `https://ilinkai.weixin.qq.com`，媒体 CDN 基座地址是 `https://novac2c.cdn.weixin.qq.com/c2c`。协议核心特征有三点：一是登录依赖二维码扫码确认；二是消息接收使用 `getupdates` 长轮询，不是 WebSocket，也不是双工流；三是每条会话消息都绑定 `context_token`，发送回复时必须回传该 token，才能把消息投递到正确的微信对话窗口。
 
 ## 2. 认证流程
 
 ### 2.1 获取二维码
 
-请求：
+**Method**
 
-```bash
-curl 'https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3'
-```
+`GET`
 
-典型响应：
+**URL**
+
+`https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3`
+
+**Headers**
+
+| Header | 是否必需 | 说明 |
+| --- | --- | --- |
+| `SKRouteTag` | 否 | 可选路由标签；仅在部署方要求时带上。 |
+
+**Body**
+
+无。
+
+**Response**
 
 ```json
 {
-  "qrcode": "qr_3_1761134400_5f82c8d90b0d4a34",
-  "qrcode_img_content": "https://weixin.qq.com/x/AbCdEfGhIjKlMnOpQrSt"
+  "qrcode": "qrc_8f4b7b1d2cf74e98baf50a5d0cc4b4b7",
+  "qrcode_img_content": "https://weixin.qq.com/x/cAbCdEfGhIj"
 }
 ```
 
@@ -50,20 +45,47 @@ curl 'https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3'
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `qrcode` | string | 二维码轮询 token，后续传给 `get_qrcode_status`。 |
-| `qrcode_img_content` | string | 可直接展示给用户的二维码内容，实际观测中是一个 URL。 |
+| `qrcode` | `string` | 二维码轮询令牌，后续传给 `get_qrcode_status`。 |
+| `qrcode_img_content` | `string` | 可直接渲染为二维码的 URL。 |
 
-### 2.2 轮询二维码状态
-
-请求：
+**curl 示例**
 
 ```bash
-curl --max-time 40 \
-  -H 'iLink-App-ClientVersion: 1' \
-  'https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=qr_3_1761134400_5f82c8d90b0d4a34'
+curl 'https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3' \
+  -H 'SKRouteTag: 1001'
 ```
 
-`status=wait` 响应：
+### 2.2 轮询扫码状态
+
+**Method**
+
+`GET`
+
+**URL**
+
+`https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=qrc_8f4b7b1d2cf74e98baf50a5d0cc4b4b7`
+
+**Headers**
+
+| Header | 是否必需 | 说明 |
+| --- | --- | --- |
+| `iLink-App-ClientVersion` | 是 | 现有实现固定传 `1`。 |
+| `SKRouteTag` | 否 | 可选路由标签。 |
+
+**Body**
+
+无。
+
+**Response 状态机**
+
+| `status` | 含义 | 下一步 |
+| --- | --- | --- |
+| `wait` | 未扫码，或本次长轮询在客户端超时后被视为“继续等待”。 | 继续轮询。 |
+| `scaned` | 已扫码，等待手机端确认。 | 继续轮询。 |
+| `confirmed` | 用户已确认，返回正式凭证。 | 持久化凭证，进入业务阶段。 |
+| `expired` | 当前二维码过期。 | 重新调用 `get_bot_qrcode` 获取新二维码。 |
+
+**Response 示例**
 
 ```json
 {
@@ -71,29 +93,21 @@ curl --max-time 40 \
 }
 ```
 
-`status=scaned` 响应：
-
 ```json
 {
   "status": "scaned"
 }
 ```
 
-注意，服务端状态值拼写就是 `scaned`，不是 `scanned`。
-
-`status=confirmed` 响应：
-
 ```json
 {
   "status": "confirmed",
-  "bot_token": "eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA",
-  "ilink_bot_id": "b0f5860fdecb@im.bot",
-  "ilink_user_id": "wxid_7h3d8k2p9q@im.wechat",
+  "bot_token": "ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r",
+  "ilink_bot_id": "e06c1ceea05e@im.bot",
+  "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
   "baseurl": "https://ilinkai.weixin.qq.com"
 }
 ```
-
-`status=expired` 响应：
 
 ```json
 {
@@ -101,73 +115,69 @@ curl --max-time 40 \
 }
 ```
 
-字段说明：
+**curl 示例**
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `status` | string | 取值为 `wait` / `scaned` / `confirmed` / `expired`。 |
-| `bot_token` | string | 登录成功后返回的 Bearer token。 |
-| `ilink_bot_id` | string | Bot 账号 ID，后续可作为账户主键。 |
-| `ilink_user_id` | string | 扫码确认的微信用户 ID。 |
-| `baseurl` | string | 后续 CGI 请求应优先使用的 API Base URL。 |
+```bash
+curl 'https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=qrc_8f4b7b1d2cf74e98baf50a5d0cc4b4b7' \
+  -H 'iLink-App-ClientVersion: 1' \
+  -H 'SKRouteTag: 1001'
+```
 
-### 2.3 完整登录时序
+**长轮询行为**
 
-推荐客户端流程如下：
+- 现有实现通常把客户端超时设置为 35 秒左右。
+- 若客户端本地超时并抛出 `AbortError`，多数实现会把这次轮询等价处理为 `{"status":"wait"}`，然后继续轮询。
+- 二维码自身有效期并未通过独立字段下发；通常在拿到 `expired` 后重新申请二维码即可。
 
-1. 调用 `GET /ilink/bot/get_bot_qrcode?bot_type=3` 获取二维码。
-2. 用 `GET /ilink/bot/get_qrcode_status?qrcode=...` 长轮询状态。
-3. `status=wait` 时继续轮询。
-4. `status=scaned` 时提示“已扫码，等待微信端确认”。
-5. `status=expired` 时重新调用 `get_bot_qrcode` 获取新二维码。
-6. `status=confirmed` 时保存 `bot_token`、`ilink_bot_id`、`ilink_user_id`、`baseurl`。
+### 2.3 返回凭证与存储建议
 
-实现侧补充说明：
+`confirmed` 响应会返回以下关键凭证：
 
-- 当前上游实现在二维码状态轮询上使用 35 秒客户端超时；如果本地超时，会把这次轮询当作 `wait` 处理并继续请求。
-- 如果 `status=confirmed` 但响应里没有 `ilink_bot_id`，实现会把这次登录视为失败。
-- 当前登录实现会在二维码多次过期时自动刷新二维码，最多刷新 3 次。
+| 字段 | 说明 |
+| --- | --- |
+| `bot_token` | 后续所有业务 POST 请求的 Bearer Token。 |
+| `ilink_bot_id` | Bot 账号 ID，格式通常为 `...@im.bot`。 |
+| `ilink_user_id` | 完成扫码授权的微信用户 ID，格式通常为 `...@im.wechat`。 |
+| `baseurl` | 业务 API 基座地址；若返回值与默认地址不同，应以后端返回值为准。 |
+
+**推荐存储格式**
+
+```json
+{
+  "token": "ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r",
+  "baseUrl": "https://ilinkai.weixin.qq.com",
+  "accountId": "e06c1ceea05e@im.bot",
+  "userId": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+  "savedAt": "2026-03-22T04:25:12.345Z"
+}
+```
+
+**工程建议**
+
+- 凭证文件权限设为 `0600`。
+- 将 `bot_token` 与 `baseurl` 一并持久化，避免重启后误用旧基座地址。
+- 为每个 `ilink_bot_id` 单独存储凭证和游标，不要多账号共用同一状态文件。
 
 ## 3. 公共请求规范
 
-### 3.1 适用范围
+### 3.1 通用请求头
 
-以下 CGI `POST` 接口遵循统一请求格式：
+以下规范适用于所有业务 `POST` 请求，也就是 `getupdates`、`sendmessage`、`getuploadurl`、`getconfig`、`sendtyping`。
 
-- `POST /ilink/bot/getupdates`
-- `POST /ilink/bot/sendmessage`
-- `POST /ilink/bot/getconfig`
-- `POST /ilink/bot/sendtyping`
-- `POST /ilink/bot/getuploadurl`
+| Header | 示例值 | 是否必需 | 说明 |
+| --- | --- | --- | --- |
+| `Content-Type` | `application/json` | 是 | 所有业务接口都发 JSON。 |
+| `AuthorizationType` | `ilink_bot_token` | 是 | 固定值。 |
+| `Authorization` | `Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r` | 是 | 二维码登录返回的 `bot_token`。 |
+| `X-WECHAT-UIN` | `MzA1NDE5ODk2` | 是 | 随机 `uint32` 的十进制字符串再做 base64。每次请求重新生成。 |
+| `Content-Length` | `187` | 是 | JSON body 的 UTF-8 字节长度。 |
+| `SKRouteTag` | `1001` | 否 | 部署方自定义路由标签。GET 登录接口通常也会带它。 |
 
-二维码相关 `GET` 接口不使用 `Authorization`。CDN 上传下载也不使用这套 Header，而是通过 URL 中的加密参数授权。
+说明：下文的 `curl` 示例里通常不手写 `Content-Length`，因为 `curl` 会自动计算；自研 SDK 直接发 HTTP 时必须自己保证该值正确。
 
-### 3.2 公共 Headers
+### 3.2 `base_info` 结构
 
-| Header | 是否必需 | 说明 |
-| --- | --- | --- |
-| `Content-Type: application/json` | 是 | 所有 CGI `POST` 都发 JSON。 |
-| `AuthorizationType: ilink_bot_token` | 是 | 固定字面量。 |
-| `Authorization: Bearer <bot_token>` | 是 | 登录成功后拿到的 token。 |
-| `Content-Length` | 是 | JSON body 的 UTF-8 字节长度；`curl` 会自动生成。 |
-| `X-WECHAT-UIN` | 是 | 每个请求都重新生成。 |
-| `SKRouteTag` | 否 | 可选路由 Header，来自上层配置；协议本身不依赖它的语义。 |
-
-一个完整的原始请求头示例如下：
-
-```http
-POST /ilink/bot/getupdates HTTP/1.1
-Host: ilinkai.weixin.qq.com
-Content-Type: application/json
-AuthorizationType: ilink_bot_token
-Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA
-X-WECHAT-UIN: MzA1NDE5ODk2
-Content-Length: 111
-```
-
-### 3.3 `base_info`
-
-所有 CGI `POST` body 都要带 `base_info`：
+所有业务 POST body 都需要携带 `base_info`。
 
 ```json
 {
@@ -181,486 +191,474 @@ Content-Length: 111
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `channel_version` | string | 客户端/SDK 的版本号。当前实现从 `package.json` 读取；读取失败时会退化为 `"unknown"`。 |
+| `channel_version` | `string` | 客户端/SDK 版本号。现有实现里常见值有 `0.1.0`、`1.0.0`、`1.0.2`。 |
 
-### 3.4 `X-WECHAT-UIN` 生成算法
+**工程建议**
 
-算法非常具体：
+- 把 `channel_version` 设为实际 SDK 版本号，便于排查兼容问题。
+- 不要省略 `base_info`，即使当前只包含一个字段。
 
-1. 生成一个随机 `uint32`。
-2. 把它转成十进制字符串。
-3. 对该十进制字符串的 UTF-8 字节做 base64 编码。
+### 3.3 `X-WECHAT-UIN` 生成算法
+
+算法是：随机生成一个 `uint32`，转成十进制字符串，再做 base64。
 
 示例：
 
-- 随机整数：`305419896`
-- 十进制字符串：`"305419896"`
-- Header 值：`MzA1NDE5ODk2`
+```text
+uint32   = 305419896
+decimal  = "305419896"
+base64   = "MzA1NDE5ODk2"
+```
 
-也就是说，`X-WECHAT-UIN` 不是二进制整数的 base64，而是“十进制文本”的 base64。
+JavaScript 示例：
 
-### 3.5 bytes 字段编码规则
+```ts
+import crypto from 'node:crypto'
 
-上游类型定义明确表明，proto 里的 bytes 字段在 JSON 中都以 base64 字符串序列化。已观测到的典型字段包括：
+function randomWechatUin(): string {
+  const value = crypto.randomBytes(4).readUInt32BE(0)
+  return Buffer.from(String(value), 'utf8').toString('base64')
+}
+```
 
-- `get_updates_buf`
-- `sync_buf`（兼容字段，已废弃）
-- `typing_ticket`
-- `CDNMedia.aes_key`
-
-而 `upload_param`、`encrypt_query_param` 这类字段虽然看起来也像 base64，但在协议层应视为 opaque string，不要自行解码或改写。
-
-## 4. 消息接收 `getupdates`
+## 4. 消息接收（`getupdates`）
 
 ### 4.1 接口定义
 
-- 方法：`POST`
-- 路径：`/ilink/bot/getupdates`
-- 作用：长轮询拉取新的 `WeixinMessage` 列表，并更新游标 `get_updates_buf`
+**Method**
 
-请求体：
+`POST`
+
+**URL**
+
+`https://ilinkai.weixin.qq.com/ilink/bot/getupdates`
+
+**Headers**
+
+使用第 3 节的通用业务请求头。
+
+**Request Body**
 
 ```json
 {
-  "get_updates_buf": "eyJsYXN0X3NlcSI6MTI4LCJsYXN0X21zZ19pZCI6OTg3NjU0MzIxfQ==",
+  "get_updates_buf": "eyJhY2NvdW50IjoiZTA2YzFjZWVhMDVlQGltLmJvdCIsInNlcSI6NDI4fQ==",
   "base_info": {
     "channel_version": "1.0.0"
   }
 }
 ```
 
-`curl` 示例：
+字段说明：
 
-```bash
-curl --max-time 40 \
-  'https://ilinkai.weixin.qq.com/ilink/bot/getupdates' \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
-  -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
-  --data-raw '{
-    "get_updates_buf": "eyJsYXN0X3NlcSI6MTI4LCJsYXN0X21zZ19pZCI6OTg3NjU0MzIxfQ==",
-    "base_info": {
-      "channel_version": "1.0.0"
-    }
-  }'
-```
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `get_updates_buf` | `string` | 长轮询游标；首次请求传空字符串 `""`。 |
+| `base_info` | `object` | 见第 3.2 节。 |
+| `sync_buf` | `string` | 已废弃兼容字段；新实现忽略即可。 |
 
-典型成功响应：
+**Response Body**
 
 ```json
 {
   "ret": 0,
   "msgs": [
     {
-      "seq": 129,
-      "message_id": 987654322,
-      "from_user_id": "wxid_7h3d8k2p9q@im.wechat",
-      "to_user_id": "b0f5860fdecb@im.bot",
-      "client_id": "wx-msg-1761134400123-a13f9b72",
-      "create_time_ms": 1761134400123,
-      "update_time_ms": 1761134400123,
-      "session_id": "sess_1761134400_d37f2c1e",
+      "seq": 429,
+      "message_id": 9812451782375,
+      "from_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+      "to_user_id": "e06c1ceea05e@im.bot",
+      "client_id": "wx-msg-1774158905123-9d7c5e21",
+      "create_time_ms": 1774158905123,
+      "update_time_ms": 1774158905123,
+      "session_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat#e06c1ceea05e@im.bot",
       "message_type": 1,
       "message_state": 2,
-      "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
+      "context_token": "AARzJWAFAAABAAAAAAAp2m3u7oE0x7V8Xw==",
       "item_list": [
         {
           "type": 1,
           "text_item": {
-            "text": "帮我总结一下这张图"
+            "text": "帮我总结一下今天的会议纪要。"
           }
         }
       ]
     }
   ],
-  "get_updates_buf": "eyJsYXN0X3NlcSI6MTI5LCJsYXN0X21zZ19pZCI6OTg3NjU0MzIyfQ==",
+  "get_updates_buf": "eyJhY2NvdW50IjoiZTA2YzFjZWVhMDVlQGltLmJvdCIsInNlcSI6NDI5fQ==",
   "longpolling_timeout_ms": 35000
 }
 ```
 
-### 4.2 请求字段
-
-| 字段 | 类型 | 必需 | 说明 |
-| --- | --- | --- | --- |
-| `get_updates_buf` | string | 是 | 上次成功拉取后保存的游标；没有时传空字符串 `""`。 |
-| `base_info` | object | 是 | 公共请求元信息。 |
-
-### 4.3 响应字段
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `ret` | number | 业务返回值；`0` 表示成功。 |
-| `errcode` | number | 出错时的错误码；`-14` 已明确表示 session 过期。 |
-| `errmsg` | string | 错误描述。 |
-| `msgs` | `WeixinMessage[]` | 新消息列表。 |
-| `get_updates_buf` | string | 下一次请求要回传的游标。 |
-| `sync_buf` | string | 兼容字段，已废弃。 |
-| `longpolling_timeout_ms` | number | 服务端建议的下一次长轮询超时时间。 |
-
-### 4.4 long-poll 机制
-
-`getupdates` 是标准长轮询：
-
-- 服务端可能会 hold 住请求，直到有新消息或超时。
-- 当前实现默认把客户端超时设为 35 秒。
-- 如果响应里带了 `longpolling_timeout_ms`，下一次轮询应采用该值。
-- 如果客户端本地 35 秒超时但没有收到任何响应，这通常是“空轮询”，不是异常。
-
-当前实现对“本地超时”的处理是返回一个逻辑成功值：
+**错误响应示例**
 
 ```json
 {
-  "ret": 0,
-  "msgs": [],
-  "get_updates_buf": "eyJsYXN0X3NlcSI6MTI4LCJsYXN0X21zZ19pZCI6OTg3NjU0MzIxfQ=="
+  "ret": -14,
+  "errcode": -14,
+  "errmsg": "session timeout"
 }
 ```
 
-也就是说，客户端可以直接带着原来的游标继续下一轮请求。
+**curl 示例**
 
-### 4.5 游标管理
+```bash
+curl 'https://ilinkai.weixin.qq.com/ilink/bot/getupdates' \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'AuthorizationType: ilink_bot_token' \
+  -H 'Authorization: Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r' \
+  -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
+  -H 'SKRouteTag: 1001' \
+  --data-raw '{
+    "get_updates_buf": "eyJhY2NvdW50IjoiZTA2YzFjZWVhMDVlQGltLmJvdCIsInNlcSI6NDI4fQ==",
+    "base_info": {
+      "channel_version": "1.0.0"
+    }
+  }'
+```
 
-`get_updates_buf` 是一个 opaque 的上下文缓存，推荐策略如下：
+### 4.2 Long-poll 机制
 
-1. 第一次拉取时发送空字符串 `""`。
-2. 每次成功返回后，如果响应里有非空 `get_updates_buf`，立刻持久化。
-3. 下一次轮询时把刚保存的值原样回传。
-4. 如果本地游标损坏、缓存丢失或你明确要重置消费位置，再改回 `""`。
+- `getupdates` 是标准长轮询接口。服务端会把连接挂起，直到有新消息，或达到服务端超时。
+- 现有实现观测到的默认长轮询窗口约为 35 秒。
+- 若响应里带 `longpolling_timeout_ms`，下次轮询应优先使用该值作为客户端超时配置。
+- 客户端本地超时不等于服务端报错；常见做法是把这次请求当作“空轮询成功”，立刻发下一轮。
 
-上游实现按账号持久化该值，说明这个游标应该和 `ilink_bot_id` 一一对应，而不是全局共享。
+### 4.3 `get_updates_buf` 游标管理
 
-### 4.6 错误处理
+`get_updates_buf` 不是可读 offset，而是一段不透明上下文缓冲区；应把它当 opaque blob 原样缓存。
 
-当前实现把以下情况都当成失败：
+**工程建议**
 
-- `ret` 存在且不等于 `0`
-- `errcode` 存在且不等于 `0`
+- 首次请求传空字符串 `""`。
+- 每次拿到新的非空 `get_updates_buf` 都立刻持久化。
+- 以 bot 账号为粒度持久化，不要多账号共用同一游标。
+- Bot token 改变、扫码重登、收到 `-14` 会话过期时，应清空本地游标。
+- 不要尝试 base64 解码并修改内容；格式没有对外保证。
 
-处理策略如下：
+推荐持久化格式：
 
-- `errcode = -14` 或 `ret = -14`：视为 session 过期，进入第 9 节的暂停与重连流程。
-- 其他业务错误：短暂重试。
-- 连续失败达到 3 次：退避 30 秒后再继续轮询。
+```json
+{
+  "get_updates_buf": "eyJhY2NvdW50IjoiZTA2YzFjZWVhMDVlQGltLmJvdCIsInNlcSI6NDI5fQ=="
+}
+```
+
+### 4.4 错误处理与重连策略
+
+**协议层规则**
+
+- `ret = 0` 表示业务成功。
+- `ret != 0` 或 `errcode != 0` 都应视为失败。
+- `errcode = -14` 或 `ret = -14` 表示 session expired，需要重新登录。
+
+**工程建议**
+
+- 普通失败：先等待 2 秒再重试。
+- 连续 3 次失败：退避 30 秒。
+- `-14`：立即停止当前账号的上下行请求，清除本地凭证和游标，重新走二维码登录。
+- 更保守的实现可以在 `-14` 后对该账号静默一段时间，避免对已过期 session 持续打流量；官方 openclaw 实现选择暂停 1 小时。
 
 ## 5. 消息数据结构
 
 ### 5.1 `WeixinMessage`
 
-`getupdates` 和 `sendmessage` 都围绕同一个统一消息结构 `WeixinMessage`：
+ID 形态通常符合以下规律：
+
+- 用户 ID：`...@im.wechat`
+- Bot ID：`...@im.bot`
+
+字段定义：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `seq` | number | 消息序号，主要用于排序/同步。 |
-| `message_id` | number | 平台消息 ID。 |
-| `from_user_id` | string | 发送方 ID。 |
-| `to_user_id` | string | 接收方 ID。 |
-| `client_id` | string | 客户端侧唯一 ID；发送消息时由客户端生成。 |
-| `create_time_ms` | number | 创建时间，毫秒时间戳。 |
-| `update_time_ms` | number | 更新时间，毫秒时间戳。 |
-| `delete_time_ms` | number | 删除时间，毫秒时间戳。 |
-| `session_id` | string | 会话 ID。 |
-| `group_id` | string | 群聊 ID；当前 direct channel 中通常为空。 |
-| `message_type` | number | 消息方向/来源类型。 |
-| `message_state` | number | 消息状态。 |
-| `item_list` | `MessageItem[]` | 消息内容项数组。 |
-| `context_token` | string | 关联上下文 token，回复时必须回传。 |
-
-枚举值：
-
-| 枚举 | 数值 | 说明 |
-| --- | --- | --- |
-| `MessageType.NONE` | `0` | 保留值。 |
-| `MessageType.USER` | `1` | 用户发给 bot 的消息。 |
-| `MessageType.BOT` | `2` | bot 发给用户的消息。 |
-| `MessageState.NEW` | `0` | 新消息。 |
-| `MessageState.GENERATING` | `1` | 生成中。 |
-| `MessageState.FINISH` | `2` | 已完成。 |
-
-完整示例：
-
-```json
-{
-  "seq": 129,
-  "message_id": 987654322,
-  "from_user_id": "wxid_7h3d8k2p9q@im.wechat",
-  "to_user_id": "b0f5860fdecb@im.bot",
-  "client_id": "wx-msg-1761134400123-a13f9b72",
-  "create_time_ms": 1761134400123,
-  "update_time_ms": 1761134400123,
-  "session_id": "sess_1761134400_d37f2c1e",
-  "message_type": 1,
-  "message_state": 2,
-  "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
-  "item_list": [
-    {
-      "type": 1,
-      "text_item": {
-        "text": "帮我总结一下这张图"
-      }
-    }
-  ]
-}
-```
+| `seq` | `number?` | 消息序列号；可用于调试顺序。 |
+| `message_id` | `number?` | 服务端消息 ID。 |
+| `from_user_id` | `string?` | 发送者 ID。 |
+| `to_user_id` | `string?` | 接收者 ID。 |
+| `client_id` | `string?` | 客户端生成的消息 ID；出站消息通常由发送方填入。 |
+| `create_time_ms` | `number?` | 创建时间，毫秒时间戳。 |
+| `update_time_ms` | `number?` | 最近更新时间，毫秒时间戳。 |
+| `delete_time_ms` | `number?` | 删除时间，毫秒时间戳。 |
+| `session_id` | `string?` | 会话 ID。 |
+| `group_id` | `string?` | 群会话 ID；协议字段存在，但公开实现目前主要处理单聊。 |
+| `message_type` | `number?` | `1 = USER`，`2 = BOT`。 |
+| `message_state` | `number?` | `0 = NEW`，`1 = GENERATING`，`2 = FINISH`。 |
+| `item_list` | `MessageItem[]?` | 消息内容数组。 |
+| `context_token` | `string?` | 会话上下文令牌；回复时必须回传。 |
 
 ### 5.2 `MessageItem`
 
-`item_list` 中的每一项都长这样：
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | `number?` | `1 = TEXT`，`2 = IMAGE`，`3 = VOICE`，`4 = FILE`，`5 = VIDEO`。 |
+| `create_time_ms` | `number?` | item 创建时间。 |
+| `update_time_ms` | `number?` | item 更新时间。 |
+| `is_completed` | `boolean?` | item 是否完成。 |
+| `msg_id` | `string?` | item 级别消息 ID。 |
+| `ref_msg` | `RefMessage?` | 引用消息。 |
+| `text_item` | `TextItem?` | 文本子结构。 |
+| `image_item` | `ImageItem?` | 图片子结构。 |
+| `voice_item` | `VoiceItem?` | 语音子结构。 |
+| `file_item` | `FileItem?` | 文件子结构。 |
+| `video_item` | `VideoItem?` | 视频子结构。 |
+
+通常一个 `MessageItem` 只会命中与其 `type` 对应的那个子结构。
+
+### 5.3 `CDNMedia`
+
+`CDNMedia` 是图片、语音、文件、视频都共用的 CDN 引用结构。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `type` | number | 内容项类型。 |
-| `create_time_ms` | number | 项级创建时间。 |
-| `update_time_ms` | number | 项级更新时间。 |
-| `is_completed` | boolean | 项级完成状态。 |
-| `msg_id` | string | 项级 ID。 |
-| `ref_msg` | `RefMessage` | 引用消息信息。 |
-| `text_item` | object | 文本项内容。 |
-| `image_item` | object | 图片项内容。 |
-| `voice_item` | object | 语音项内容。 |
-| `file_item` | object | 文件项内容。 |
-| `video_item` | object | 视频项内容。 |
+| `encrypt_query_param` | `string?` | CDN 下载所需的加密查询参数。 |
+| `aes_key` | `string?` | base64 编码的 AES key；具体编码形式见第 8.4 节。 |
+| `encrypt_type` | `number?` | `0 = 只加密 file id`，`1 = 打包缩略图/中图等附加信息`。 |
 
-类型枚举如下：
+示例：
 
-| `type` | 名称 | 说明 |
+```json
+{
+  "encrypt_query_param": "AAFFc8c2PXQ5mKPw7rbcH7S1EA=",
+  "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
+  "encrypt_type": 1
+}
+```
+
+### 5.4 TEXT
+
+结构最简单：
+
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `1` | `TEXT` | 文本消息。 |
-| `2` | `IMAGE` | 图片消息。 |
-| `3` | `VOICE` | 语音消息。 |
-| `4` | `FILE` | 文件消息。 |
-| `5` | `VIDEO` | 视频消息。 |
+| `text` | `string?` | 文本正文。 |
 
-### 5.3 5 种 `MessageItem` 结构
-
-#### 5.3.1 `TEXT`
+示例：
 
 ```json
 {
   "type": 1,
   "text_item": {
-    "text": "请把这张图片里的文字提取出来"
+    "text": "会议纪要已整理完毕，共 3 个行动项。"
   }
 }
 ```
 
-`TextItem` 只有一个字段：
+### 5.5 IMAGE
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `text` | string | 文本内容。 |
+| `media` | `CDNMedia?` | 原图/主图引用。 |
+| `thumb_media` | `CDNMedia?` | 缩略图引用。 |
+| `aeskey` | `string?` | 16 字节 AES key 的 hex 字符串，共 32 个十六进制字符；某些入站图片会直接给这个字段。 |
+| `url` | `string?` | 某些客户端会填预览 URL。 |
+| `mid_size` | `number?` | 中图或主图密文大小。公开发送实现通常把它填成上传后密文长度。 |
+| `thumb_size` | `number?` | 缩略图密文大小。 |
+| `thumb_height` | `number?` | 缩略图高度，像素。 |
+| `thumb_width` | `number?` | 缩略图宽度，像素。 |
+| `hd_size` | `number?` | 高清图密文大小。 |
 
-#### 5.3.2 `IMAGE`
+示例：
 
 ```json
 {
   "type": 2,
   "image_item": {
     "media": {
-      "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8xIiwic2lnIjoiZG93bmxvYWQifQ==",
+      "encrypt_query_param": "AAFFc8c2PXQ5mKPw7rbcH7S1EA=",
+      "aes_key": "ABEiM0RVZneImaq7zN3u/w==",
+      "encrypt_type": 1
+    },
+    "thumb_media": {
+      "encrypt_query_param": "AAHf7b8e3krX5cY7nqB0F0kM1A=",
       "aes_key": "ABEiM0RVZneImaq7zN3u/w==",
       "encrypt_type": 1
     },
     "aeskey": "00112233445566778899aabbccddeeff",
-    "mid_size": 24576,
-    "thumb_size": 4096,
-    "thumb_height": 320,
-    "thumb_width": 320,
-    "hd_size": 24576
+    "mid_size": 248736,
+    "thumb_size": 18224,
+    "thumb_width": 360,
+    "thumb_height": 240,
+    "hd_size": 248736
   }
 }
 ```
 
-字段说明：
+### 5.6 VOICE
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `media` | `CDNMedia` | 原图 CDN 引用。 |
-| `thumb_media` | `CDNMedia` | 缩略图 CDN 引用。 |
-| `aeskey` | string | 原始 16 字节 AES key 的 hex 字符串；图片入站解密时优先使用它。 |
-| `url` | string | 可选 URL。当前实现不依赖它做下载。 |
-| `mid_size` | number | 中图/原图密文字节数。 |
-| `thumb_size` | number | 缩略图密文字节数。 |
-| `thumb_height` | number | 缩略图高。 |
-| `thumb_width` | number | 缩略图宽。 |
-| `hd_size` | number | 高清图密文字节数。 |
+| `media` | `CDNMedia?` | 语音 CDN 引用。 |
+| `encode_type` | `number?` | 语音编码：`1 = pcm`，`2 = adpcm`，`3 = feature`，`4 = speex`，`5 = amr`，`6 = silk`，`7 = mp3`，`8 = ogg-speex`。 |
+| `bits_per_sample` | `number?` | 位深。 |
+| `sample_rate` | `number?` | 采样率，Hz。 |
+| `playtime` | `number?` | 播放时长，毫秒。 |
+| `text` | `string?` | 语音转文字结果。 |
 
-#### 5.3.3 `VOICE`
+示例：
 
 ```json
 {
   "type": 3,
   "voice_item": {
     "media": {
-      "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8yIiwic2lnIjoiZG93bmxvYWQifQ==",
+      "encrypt_query_param": "AAK2xQ8gqV9h5EmYxM2u3r7Q2A=",
       "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
       "encrypt_type": 1
     },
     "encode_type": 6,
     "bits_per_sample": 16,
     "sample_rate": 24000,
-    "playtime": 3120,
-    "text": "会议几点开始"
+    "playtime": 4210,
+    "text": "我下午三点到。"
   }
 }
 ```
 
-字段说明：
+### 5.7 FILE
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `media` | `CDNMedia` | 语音 CDN 引用。 |
-| `encode_type` | number | 编码类型；已观测到的枚举为 `1=pcm`、`2=adpcm`、`3=feature`、`4=speex`、`5=amr`、`6=silk`、`7=mp3`、`8=ogg-speex`。 |
-| `bits_per_sample` | number | 采样位深。 |
-| `sample_rate` | number | 采样率，单位 Hz。 |
-| `playtime` | number | 语音时长，单位毫秒。 |
-| `text` | string | 语音转写结果。若存在，当前实现会直接把它作为入站文本正文。 |
+| `media` | `CDNMedia?` | 文件 CDN 引用。 |
+| `file_name` | `string?` | 文件名。 |
+| `md5` | `string?` | 文件 MD5。 |
+| `len` | `string?` | 明文文件大小，字符串形式。 |
 
-#### 5.3.4 `FILE`
+示例：
 
 ```json
 {
   "type": 4,
   "file_item": {
     "media": {
-      "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8zIiwic2lnIjoiZG93bmxvYWQifQ==",
+      "encrypt_query_param": "AALk1J1Rljnmdk6PMx1PZ0h4mA=",
       "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
       "encrypt_type": 1
     },
-    "file_name": "budget-2026.xlsx",
-    "md5": "6f5902ac237024bdd0c176cb93063dc4",
-    "len": "83412"
+    "file_name": "报价单-2026Q1.pdf",
+    "md5": "9d2a7b9c3e2f1d41c7d5b3a1a7e1c6f0",
+    "len": "542188"
   }
 }
 ```
 
-字段说明：
+### 5.8 VIDEO
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `media` | `CDNMedia` | 文件 CDN 引用。 |
-| `file_name` | string | 文件名。 |
-| `md5` | string | 明文 MD5。 |
-| `len` | string | 明文字节数，注意类型是字符串。 |
+| `media` | `CDNMedia?` | 视频主文件 CDN 引用。 |
+| `video_size` | `number?` | 视频密文大小。 |
+| `play_length` | `number?` | 视频时长，毫秒。 |
+| `video_md5` | `string?` | 视频文件 MD5。 |
+| `thumb_media` | `CDNMedia?` | 视频缩略图引用。 |
+| `thumb_size` | `number?` | 视频缩略图密文大小。 |
+| `thumb_height` | `number?` | 缩略图高度，像素。 |
+| `thumb_width` | `number?` | 缩略图宽度，像素。 |
 
-#### 5.3.5 `VIDEO`
+示例：
 
 ```json
 {
   "type": 5,
   "video_item": {
     "media": {
-      "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF80Iiwic2lnIjoiZG93bmxvYWQifQ==",
+      "encrypt_query_param": "AAOtQ1BTT3pQ6H3ak1O8P2aR1A=",
       "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
       "encrypt_type": 1
     },
-    "video_size": 5242880,
-    "play_length": 19000,
-    "video_md5": "8f14e45fceea167a5a36dedd4bea2543",
+    "video_size": 10485776,
+    "play_length": 18320,
+    "video_md5": "8e7f6a5b4c3d2e1f0011223344556677",
     "thumb_media": {
-      "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF80X3RodW1iIiwic2lnIjoiZG93bmxvYWQifQ==",
-      "aes_key": "ABEiM0RVZneImaq7zN3u/w==",
+      "encrypt_query_param": "AAJtQ4YTW2Z0sY5YwL2g0hTzTA=",
+      "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
       "encrypt_type": 1
     },
-    "thumb_size": 4096,
-    "thumb_height": 320,
-    "thumb_width": 320
+    "thumb_size": 23696,
+    "thumb_width": 320,
+    "thumb_height": 180
   }
 }
 ```
 
-字段说明：
+### 5.9 `RefMessage`
+
+`ref_msg` 用于引用消息。结构如下：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `media` | `CDNMedia` | 视频 CDN 引用。 |
-| `video_size` | number | 视频密文字节数。 |
-| `play_length` | number | 播放时长，单位毫秒。 |
-| `video_md5` | string | 视频明文 MD5。 |
-| `thumb_media` | `CDNMedia` | 视频缩略图 CDN 引用。 |
-| `thumb_size` | number | 缩略图密文字节数。 |
-| `thumb_height` | number | 缩略图高。 |
-| `thumb_width` | number | 缩略图宽。 |
+| `title` | `string?` | 引用摘要。 |
+| `message_item` | `MessageItem?` | 被引用的具体 item。 |
 
-### 5.4 `CDNMedia`
-
-`CDNMedia` 是所有媒体项共用的 CDN 引用结构：
+示例：
 
 ```json
 {
-  "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8xIiwic2lnIjoiZG93bmxvYWQifQ==",
-  "aes_key": "ABEiM0RVZneImaq7zN3u/w==",
-  "encrypt_type": 1
-}
-```
-
-字段说明：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `encrypt_query_param` | string | CDN 下载参数，拼到 `/download?encrypted_query_param=...`。 |
-| `aes_key` | string | base64 编码的 key 数据，具体编码格式见第 8.4 节。 |
-| `encrypt_type` | number | `0=只加密 fileid`，`1=同时打包缩略图/中图等信息`。当前发送实现统一写 `1`。 |
-
-### 5.5 `RefMessage`
-
-`MessageItem` 可以带 `ref_msg`，表示对另一条消息的引用：
-
-```json
-{
-  "title": "上条消息",
-  "message_item": {
-    "type": 1,
-    "text_item": {
-      "text": "请看下这个报表"
+  "type": 1,
+  "text_item": {
+    "text": "请继续补充这一条。"
+  },
+  "ref_msg": {
+    "title": "引用了一条消息",
+    "message_item": {
+      "type": 1,
+      "text_item": {
+        "text": "会议纪要初稿已完成。"
+      }
     }
   }
 }
 ```
 
-字段说明：
+### 5.10 `context_token` 的作用和生命周期
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `title` | string | 引用摘要。 |
-| `message_item` | `MessageItem` | 被引用的消息项。 |
+`context_token` 是微信 iLink 协议最关键的字段。它的语义不是“用户 ID”，而是“当前对话上下文的会话能力令牌”。
 
-### 5.6 `context_token`
+**已确认行为**
 
-`context_token` 是整个协议最重要的会话关联字段之一：
+- 入站 `WeixinMessage` 会带 `context_token`。
+- 出站 `sendmessage` 时，公开实现都会把入站消息里的 `context_token` 原样回传。
+- 缺失 `context_token` 时，公开实现通常直接拒绝发送，或发送后无法正确关联会话。
 
-- 它由 `getupdates` 的入站消息提供。
-- 发送回复时必须在 `sendmessage.msg.context_token` 中原样回传。
-- Typing 票据 `getconfig` 也会用到它。
-- 当前上游实现把它按 `accountId + from_user_id` 维度做进程内缓存，不会持久化到磁盘。
+**工程建议**
 
-如果没有 `context_token`，当前发送实现会直接拒绝发消息，因为消息无法正确挂回原对话。
+- 以 `(accountId, userId)` 为 key 缓存最近一次 `context_token`。
+- 不要跨用户、跨 bot 账号复用 token。
+- 不要伪造 token。
+- 进程重启后若没有恢复上下文，主动消息发送能力通常也会丢失；协议里未观察到单独“打开会话”的 API。
 
-## 6. 消息发送 `sendmessage`
+## 6. 消息发送（`sendmessage`）
 
 ### 6.1 接口定义
 
-- 方法：`POST`
-- 路径：`/ilink/bot/sendmessage`
-- 作用：下发一条 bot 消息
+**Method**
 
-请求外层结构固定为：
+`POST`
+
+**URL**
+
+`https://ilinkai.weixin.qq.com/ilink/bot/sendmessage`
+
+**Headers**
+
+使用第 3 节的通用业务请求头。
+
+**Request Body**
 
 ```json
 {
   "msg": {
     "from_user_id": "",
-    "to_user_id": "wxid_7h3d8k2p9q@im.wechat",
-    "client_id": "openclaw-weixin:1761134405123-2a470a99",
+    "to_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+    "client_id": "pinix-weixin:1774158910456-a1b2c3d4",
     "message_type": 2,
     "message_state": 2,
-    "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
+    "context_token": "AARzJWAFAAABAAAAAAAp2m3u7oE0x7V8Xw==",
     "item_list": [
       {
         "type": 1,
         "text_item": {
-          "text": "你好，我已经收到图片了。"
+          "text": "会议纪要已整理完毕，共 3 个行动项。"
         }
       }
     ]
@@ -671,28 +669,37 @@ curl --max-time 40 \
 }
 ```
 
-文本消息 `curl` 示例：
+**Response Body**
+
+官方类型把 `SendMessageResp` 定义为空结构，因此通常只以 HTTP 200 作为成功判定。可把成功响应视为：
+
+```json
+{}
+```
+
+**curl 示例**
 
 ```bash
 curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendmessage' \
   -X POST \
   -H 'Content-Type: application/json' \
   -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
+  -H 'Authorization: Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r' \
   -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
+  -H 'SKRouteTag: 1001' \
   --data-raw '{
     "msg": {
       "from_user_id": "",
-      "to_user_id": "wxid_7h3d8k2p9q@im.wechat",
-      "client_id": "openclaw-weixin:1761134405123-2a470a99",
+      "to_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+      "client_id": "pinix-weixin:1774158910456-a1b2c3d4",
       "message_type": 2,
       "message_state": 2,
-      "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
+      "context_token": "AARzJWAFAAABAAAAAAAp2m3u7oE0x7V8Xw==",
       "item_list": [
         {
           "type": 1,
           "text_item": {
-            "text": "你好，我已经收到图片了。"
+            "text": "会议纪要已整理完毕，共 3 个行动项。"
           }
         }
       ]
@@ -703,174 +710,189 @@ curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendmessage' \
   }'
 ```
 
-当前实现对成功响应体没有结构化依赖，HTTP `200 OK` 即视为发送成功；`SendMessageResp` 类型本身也是空结构。
+### 6.2 `message_type`
 
-### 6.2 字段规则
+| 值 | 含义 | 使用建议 |
+| --- | --- | --- |
+| `1` | `USER` | 入站消息使用。 |
+| `2` | `BOT` | 机器人发出的消息使用。 |
 
-| 字段 | 规则 |
-| --- | --- |
-| `from_user_id` | 当前发送实现固定写空字符串 `""`。 |
-| `to_user_id` | 必须是目标微信用户 ID。 |
-| `client_id` | 需要客户端唯一。当前实现格式为 `openclaw-weixin:<timestamp>-<8hex>`。 |
-| `message_type` | bot 发送固定写 `2`。 |
-| `message_state` | 当前发送实现固定写 `2`，即 `FINISH`。 |
-| `context_token` | 必填，必须原样回传入站消息里的值。 |
-| `item_list` | 消息内容数组。当前实现通常一条请求只发一个 item。 |
+出站调用 `sendmessage` 时应固定写 `2`。
 
-### 6.3 媒体消息示例
+### 6.3 `message_state`
 
-在媒体文件已经上传到 CDN 之后，`sendmessage` 只负责引用媒体：
+| 值 | 含义 | 说明 |
+| --- | --- | --- |
+| `0` | `NEW` | 新消息或起始状态。 |
+| `1` | `GENERATING` | 生成中。 |
+| `2` | `FINISH` | 完成态。 |
 
-```bash
-curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendmessage' \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
-  -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
-  --data-raw '{
-    "msg": {
-      "from_user_id": "",
-      "to_user_id": "wxid_7h3d8k2p9q@im.wechat",
-      "client_id": "openclaw-weixin:1761134406123-8b7c9d01",
-      "message_type": 2,
-      "message_state": 2,
-      "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
-      "item_list": [
-        {
-          "type": 2,
-          "image_item": {
-            "media": {
-              "encrypt_query_param": "eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8xIiwic2lnIjoiZG93bmxvYWQifQ==",
-              "aes_key": "ABEiM0RVZneImaq7zN3u/w==",
-              "encrypt_type": 1
-            },
-            "mid_size": 24576
-          }
-        }
-      ]
-    },
-    "base_info": {
-      "channel_version": "1.0.0"
-    }
-  }'
-```
+**已确认行为**
 
-### 6.4 `message_type` / `message_state`
+- 公开实现目前都稳定使用 `FINISH = 2`。
 
-当前已观测到的稳定用法如下：
+**实测结论（2026-03-22）**
 
-- 用户入站消息：`message_type = 1`
-- bot 出站消息：`message_type = 2`
-- 出站消息当前统一使用 `message_state = 2`
+使用同一 `client_id` 发送 `GENERATING → GENERATING → FINISH` 三条消息，API 层面均返回 200，但微信客户端仅显示第一条 `GENERATING` 的内容，后续的 `GENERATING` 和 `FINISH` 更新未在聊天气泡中渲染。对照组使用不同 `client_id` 各发一条 `FINISH`，三条消息均独立显示。
 
-虽然类型定义里存在 `message_state = 1 (GENERATING)`，但本次检查到的发送实现没有用它做流式中间态；实际“正在输入”效果是通过 `sendtyping` 提供的，而不是通过多次更新同一条 `sendmessage`。
+推测 `GENERATING` 可能仅在微信内置 AI 对话界面（非普通 bot 会话窗口）中支持气泡实时更新，或者需要特定的客户端版本/配置才能生效。官方 openclaw-weixin 插件代码中也完全不使用 `GENERATING`，所有发送均为 `FINISH`。
 
-### 6.5 `context_token`
+**工程建议**
 
-回复消息时，`context_token` 不是可选优化，而是硬约束：
+- 稳定投递：直接使用 `FINISH = 2`。
+- 模拟流式效果：用不同 `client_id` 发送多条独立 `FINISH` 消息。
+- 显示”正在输入”：使用 `sendtyping` API（见第 7 章），而非 `GENERATING` 状态。
+- `GENERATING = 1`：协议预留能力，当前在普通 bot 对话中不可用，不建议依赖。
 
-- 少了它，平台无法把回复关联到对应的上下文。
-- 当前实现缺失时会直接抛错：`contextToken is required`。
-- 因为 `context_token` 来源于上一次入站消息，所以主动发起新对话不是这个协议栈的主路径；典型模式是“收到消息 -> 带同一个 `context_token` 回复”。
+### 6.4 `context_token` 的必要性
 
-### 6.6 分片策略
+对微信 iLink 来说，`context_token` 不是可选增强字段，而是会话路由锚点。只知道 `to_user_id` 不足以安全回复当前会话。
 
-协议本身允许 `item_list` 是数组，但当前上游发送策略更保守：
+实践上应把它视为必填项：
 
-1. 纯文本：一条 `sendmessage`，`item_list` 里只有一个 `TEXT` item。
-2. 文本 + 媒体：拆成两条请求，先发文本，再发媒体。
-3. 多个媒体：每个媒体各发一次 `sendmessage`，保证每条请求的 `item_list` 只有一个 item。
-4. 文本长度分片：上层 channel 配置里把单段文本限制为 4000 字符，超长文本应在进入 `sendmessage` 之前切段。
+- 文本回复：必填。
+- 图片/文件/视频回复：必填。
+- typing 状态：虽然 `sendtyping` 本身不直接带 `context_token`，但 `getconfig` 获取 `typing_ticket` 时通常会带上它。
 
-这意味着如果你要兼容现有实现，最稳妥的做法就是“单 item 发送”，不要依赖一次请求同时携带多个异构 item。
+### 6.5 长消息分片策略（2000 字符限制）
 
-补充说明：协议类型里有 `VOICE` item 和 `UploadMediaType.VOICE = 4`，但本次检查到的出站封装只实现了图片、视频和普通文件上传发送，没有封装语音出站 helper。
+协议没有单独下发“最大文本长度”字段，但社区实现普遍以 2000 字符作为保守兼容上限。建议把这当作客户端兼容策略，而不是服务端公开宣告的硬编码常量。
+
+**推荐分片算法**
+
+1. 以 2000 个 Unicode 字符为上限。
+2. 优先在 `\n\n`、其次在 `\n`、再次在空格处分片。
+3. 找不到合适边界时，硬切 2000 字符。
+4. 每个分片单独调用一次 `sendmessage`。
+5. 每个分片使用新的 `client_id`，复用同一个 `context_token`。
+
+### 6.6 `client_id` 生成
+
+服务端没有公开 `client_id` 格式约束，但它必须全局唯一，便于幂等、排障和链路跟踪。
+
+常见做法：
+
+- UUIDv4，例如 `7e4f5d8e-c0ab-4e3c-a98f-0c84f0b0d51a`
+- 前缀 + 时间戳 + 随机后缀，例如 `pinix-weixin:1774158910456-a1b2c3d4`
+
+**工程建议**
+
+- 在同一进程内不要重复使用同一 `client_id`。
+- 文本与媒体分开发送时，每一条都生成新的 `client_id`。
+
+### 6.7 `item_list` 的发送习惯
+
+协议层允许 `item_list` 是数组，但公开稳定实现里，最常见做法是一条请求只发一个 `MessageItem`。带说明文字的媒体消息通常会拆成两条：先发 `TEXT`，再发 `IMAGE`/`FILE`/`VIDEO`。这样做的兼容性最好，也更容易定位失败点。
 
 ## 7. Typing 状态
 
-Typing 由两个接口组合完成：
+### 7.1 `getconfig` 获取 `typing_ticket`
 
-1. `getconfig` 获取某个用户对应的 `typing_ticket`
-2. `sendtyping` 上报开始 / 结束输入状态
+**Method**
 
-### 7.1 `getconfig`
+`POST`
 
-- 方法：`POST`
-- 路径：`/ilink/bot/getconfig`
+**URL**
 
-请求体：
+`https://ilinkai.weixin.qq.com/ilink/bot/getconfig`
+
+**Request Body**
 
 ```json
 {
-  "ilink_user_id": "wxid_7h3d8k2p9q@im.wechat",
-  "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
+  "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+  "context_token": "AARzJWAFAAABAAAAAAAp2m3u7oE0x7V8Xw==",
   "base_info": {
     "channel_version": "1.0.0"
   }
 }
 ```
 
-`curl` 示例：
+说明：类型定义把 `context_token` 视为可选，但公开实现在可用时通常会带上它。
+
+**Response Body**
+
+```json
+{
+  "ret": 0,
+  "typing_ticket": "dHlwaW5nLXRpY2tldC1vOWNxODAwa3VtXzRnOFB5OFF3NUcwYQ=="
+}
+```
+
+**curl 示例**
 
 ```bash
 curl 'https://ilinkai.weixin.qq.com/ilink/bot/getconfig' \
   -X POST \
   -H 'Content-Type: application/json' \
   -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
+  -H 'Authorization: Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r' \
   -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
   --data-raw '{
-    "ilink_user_id": "wxid_7h3d8k2p9q@im.wechat",
-    "context_token": "Y3R4LXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLTJhNDcwYTk5",
+    "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+    "context_token": "AARzJWAFAAABAAAAAAAp2m3u7oE0x7V8Xw==",
     "base_info": {
       "channel_version": "1.0.0"
     }
   }'
 ```
 
-典型响应：
+### 7.2 `sendtyping` 发送/取消输入状态
+
+**Method**
+
+`POST`
+
+**URL**
+
+`https://ilinkai.weixin.qq.com/ilink/bot/sendtyping`
+
+**Request Body（开始输入）**
 
 ```json
 {
-  "ret": 0,
-  "errmsg": "",
-  "typing_ticket": "dHlwLXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLWY4N2QwYQ=="
+  "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+  "typing_ticket": "dHlwaW5nLXRpY2tldC1vOWNxODAwa3VtXzRnOFB5OFF3NUcwYQ==",
+  "status": 1,
+  "base_info": {
+    "channel_version": "1.0.0"
+  }
 }
 ```
 
-字段说明：
+**Request Body（取消输入）**
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `ret` | number | `0` 表示成功。 |
-| `errmsg` | string | 错误信息。 |
-| `typing_ticket` | string | base64 编码的 typing ticket。 |
+```json
+{
+  "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+  "typing_ticket": "dHlwaW5nLXRpY2tldC1vOWNxODAwa3VtXzRnOFB5OFF3NUcwYQ==",
+  "status": 2,
+  "base_info": {
+    "channel_version": "1.0.0"
+  }
+}
+```
 
-当前上游实现会按 `userId` 缓存 `typing_ticket`，缓存窗口最长 24 小时；刷新失败时按 `2s -> 4s -> 8s ... -> 1h` 做指数退避。
+**Response Body**
 
-### 7.2 `sendtyping`
+```json
+{
+  "ret": 0
+}
+```
 
-- 方法：`POST`
-- 路径：`/ilink/bot/sendtyping`
-
-状态枚举：
-
-- `1 = TYPING`
-- `2 = CANCEL`
-
-开始输入 `curl` 示例：
+**curl 示例**
 
 ```bash
 curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendtyping' \
   -X POST \
   -H 'Content-Type: application/json' \
   -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
+  -H 'Authorization: Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r' \
   -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
   --data-raw '{
-    "ilink_user_id": "wxid_7h3d8k2p9q@im.wechat",
-    "typing_ticket": "dHlwLXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLWY4N2QwYQ==",
+    "ilink_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+    "typing_ticket": "dHlwaW5nLXRpY2tldC1vOWNxODAwa3VtXzRnOFB5OFF3NUcwYQ==",
     "status": 1,
     "base_info": {
       "channel_version": "1.0.0"
@@ -878,83 +900,48 @@ curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendtyping' \
   }'
 ```
 
-取消输入 `curl` 示例：
+**工程建议**
 
-```bash
-curl 'https://ilinkai.weixin.qq.com/ilink/bot/sendtyping' \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
-  -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
-  --data-raw '{
-    "ilink_user_id": "wxid_7h3d8k2p9q@im.wechat",
-    "typing_ticket": "dHlwLXd4aWRfN2gzZDhrMnA5cS0xNzYxMTM0NDAwMDAwLWY4N2QwYQ==",
-    "status": 2,
-    "base_info": {
-      "channel_version": "1.0.0"
-    }
-  }'
-```
+- `status = 1` 表示开始/保持输入中，`status = 2` 表示取消。
+- 如果生成耗时较长，可以每 5 秒发送一次 `status = 1` 作为 keepalive。
+- 回复结束后务必发送一次 `status = 2` 清理状态。
+- `typing_ticket` 可按用户缓存；公开实现会在成功获取后缓存约 24 小时，并在失败时退避刷新。
 
-典型响应：
+## 8. 媒体处理（CDN）
 
-```json
-{
-  "ret": 0,
-  "errmsg": ""
-}
-```
+### 8.1 CDN 基座地址
 
-当前上游实现会在模型生成期间每 5 秒发一次 `status=1` keepalive，结束时发一次 `status=2` 取消。
+媒体上传下载统一走：
 
-## 8. 媒体处理 CDN
+`https://novac2c.cdn.weixin.qq.com/c2c`
 
-### 8.1 上传总流程
+实际路径：
 
-媒体发送的完整流程如下：
+- 上传：`/upload?encrypted_query_param=...&filekey=...`
+- 下载：`/download?encrypted_query_param=...`
 
-1. 读取明文文件。
-2. 计算 `rawsize` 和 `rawfilemd5`。
-3. 生成随机 `filekey` 和随机 16 字节 `aeskey`。
-4. 按 AES-128-ECB + PKCS7 计算密文大小 `filesize`。
-5. 调用 `getuploadurl` 获取 `upload_param`。
-6. 用同一个 `aeskey` 对文件明文加密后上传到 CDN。
-7. 从 CDN 响应头中取回 `x-encrypted-param`，把它填入后续消息里的 `media.encrypt_query_param`。
-8. 把 `aeskey` 按协议编码成 `CDNMedia.aes_key`，再通过 `sendmessage` 引用该媒体。
+### 8.2 上传流程：`getuploadurl` → AES-128-ECB 加密 → POST CDN upload
 
-`filesize` 的计算公式与上游实现完全一致：
+#### 第一步：申请上传参数
 
-```text
-filesize = ceil((rawsize + 1) / 16) * 16
-```
+**Method**
 
-也就是先按 PKCS7 至少补 1 字节，再对齐到 16 字节块边界。
+`POST`
 
-### 8.2 `getuploadurl`
+**URL**
 
-- 方法：`POST`
-- 路径：`/ilink/bot/getuploadurl`
+`https://ilinkai.weixin.qq.com/ilink/bot/getuploadurl`
 
-`media_type` 枚举如下：
-
-| 数值 | 名称 |
-| --- | --- |
-| `1` | `IMAGE` |
-| `2` | `VIDEO` |
-| `3` | `FILE` |
-| `4` | `VOICE` |
-
-请求体示例：
+**Request Body（当前最稳妥的无缩略图路径）**
 
 ```json
 {
-  "filekey": "4f2a6c9981f74e0bb2214cdb88a1a245",
+  "filekey": "7cc7ad1d6aaf4c32b23dc4f8c40ec0cf",
   "media_type": 1,
-  "to_user_id": "wxid_7h3d8k2p9q@im.wechat",
-  "rawsize": 24563,
-  "rawfilemd5": "6f5902ac237024bdd0c176cb93063dc4",
-  "filesize": 24576,
+  "to_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+  "rawsize": 248731,
+  "rawfilemd5": "9c4d5c0b21f7f5c77c2b12f05f1b8df8",
+  "filesize": 248736,
   "no_need_thumb": true,
   "aeskey": "00112233445566778899aabbccddeeff",
   "base_info": {
@@ -963,22 +950,53 @@ filesize = ceil((rawsize + 1) / 16) * 16
 }
 ```
 
-`curl` 示例：
+字段说明：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `filekey` | `string` | 本次上传的客户端文件 ID，通常随机 16 字节 hex。 |
+| `media_type` | `number` | `1 = IMAGE`，`2 = VIDEO`，`3 = FILE`，`4 = VOICE`。 |
+| `to_user_id` | `string` | 目标用户 ID。 |
+| `rawsize` | `number` | 明文文件大小。 |
+| `rawfilemd5` | `string` | 明文文件 MD5。 |
+| `filesize` | `number` | AES-128-ECB + PKCS7 填充后的密文大小。 |
+| `thumb_rawsize` | `number?` | 缩略图明文大小。 |
+| `thumb_rawfilemd5` | `string?` | 缩略图明文 MD5。 |
+| `thumb_filesize` | `number?` | 缩略图密文大小。 |
+| `no_need_thumb` | `boolean?` | 是否不需要缩略图上传 URL。 |
+| `aeskey` | `string?` | 16 字节 AES key 的 hex 字符串。注意这里是 hex，不是 base64。 |
+
+密文大小计算公式：
+
+```text
+filesize = ceil((rawsize + 1) / 16) * 16
+```
+
+**Response Body**
+
+```json
+{
+  "upload_param": "AABQmM4mZ2Yx_d4mcpG4vincN2=",
+  "thumb_upload_param": ""
+}
+```
+
+**curl 示例**
 
 ```bash
 curl 'https://ilinkai.weixin.qq.com/ilink/bot/getuploadurl' \
   -X POST \
   -H 'Content-Type: application/json' \
   -H 'AuthorizationType: ilink_bot_token' \
-  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.ilink_bot_demo.2wYH0XxJqO9iN0E4x1Q7FA' \
+  -H 'Authorization: Bearer ilinkbot_4Q7iH3oVt9YF0dJ2sK1mLp6r' \
   -H 'X-WECHAT-UIN: MzA1NDE5ODk2' \
   --data-raw '{
-    "filekey": "4f2a6c9981f74e0bb2214cdb88a1a245",
+    "filekey": "7cc7ad1d6aaf4c32b23dc4f8c40ec0cf",
     "media_type": 1,
-    "to_user_id": "wxid_7h3d8k2p9q@im.wechat",
-    "rawsize": 24563,
-    "rawfilemd5": "6f5902ac237024bdd0c176cb93063dc4",
-    "filesize": 24576,
+    "to_user_id": "o9cq800kum_4g8Py8Qw5G0a@im.wechat",
+    "rawsize": 248731,
+    "rawfilemd5": "9c4d5c0b21f7f5c77c2b12f05f1b8df8",
+    "filesize": 248736,
     "no_need_thumb": true,
     "aeskey": "00112233445566778899aabbccddeeff",
     "base_info": {
@@ -987,260 +1005,287 @@ curl 'https://ilinkai.weixin.qq.com/ilink/bot/getuploadurl' \
   }'
 ```
 
-典型响应：
+#### 第二步：本地加密文件
 
-```json
-{
-  "upload_param": "eyJmaWxlaWQiOiJ1cF8xNzYxMTM0NDAwMDAwXzEiLCJzaWciOiJ1cGxvYWQifQ==",
-  "thumb_upload_param": ""
+加密算法固定为 `AES-128-ECB`，使用 PKCS7 padding。
+
+```ts
+import { createCipheriv } from 'node:crypto'
+
+function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
+  const cipher = createCipheriv('aes-128-ecb', key, null)
+  return Buffer.concat([cipher.update(plaintext), cipher.final()])
 }
 ```
 
-字段说明：
+#### 第三步：上传到 CDN
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `filekey` | string | 客户端生成的 16 字节随机值的 hex 字符串。 |
-| `media_type` | number | 见上表。 |
-| `to_user_id` | string | 目标用户 ID。 |
-| `rawsize` | number | 明文字节数。 |
-| `rawfilemd5` | string | 明文 MD5，hex 字符串。 |
-| `filesize` | number | AES-ECB 加密后的密文字节数。 |
-| `thumb_rawsize` | number | 缩略图明文字节数。 |
-| `thumb_rawfilemd5` | string | 缩略图明文 MD5。 |
-| `thumb_filesize` | number | 缩略图密文字节数。 |
-| `no_need_thumb` | boolean | 是否不需要缩略图上传 URL。 |
-| `aeskey` | string | 原始 16 字节 AES key 的 hex 字符串。 |
-| `upload_param` | string | 原文件上传参数。 |
-| `thumb_upload_param` | string | 缩略图上传参数。 |
+**Method**
 
-当前上游上传实现始终设置 `no_need_thumb: true`，因此不会再发第二次缩略图上传；但从字段设计看，协议本身支持图片和视频的双上传。
+`POST`
 
-### 8.3 CDN 上传
+**URL**
 
-CDN 上传 URL 规则如下：
+`https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=AABQmM4mZ2Yx_d4mcpG4vincN2%3D&filekey=7cc7ad1d6aaf4c32b23dc4f8c40ec0cf`
 
-```text
-POST {cdnBaseUrl}/upload?encrypted_query_param={upload_param}&filekey={filekey}
-```
+**Headers**
 
-默认 `cdnBaseUrl`：
+| Header | 值 |
+| --- | --- |
+| `Content-Type` | `application/octet-stream` |
 
-```text
-https://novac2c.cdn.weixin.qq.com/c2c
-```
+**Body**
 
-请求要求：
+AES-128-ECB 加密后的文件二进制内容。
 
-- `Content-Type: application/octet-stream`
-- body 是文件明文经 AES-128-ECB + PKCS7 加密后的密文
-
-`curl` 示例：
-
-```bash
-curl -i \
-  'https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=eyJmaWxlaWQiOiJ1cF8xNzYxMTM0NDAwMDAwXzEiLCJzaWciOiJ1cGxvYWQifQ%3D%3D&filekey=4f2a6c9981f74e0bb2214cdb88a1a245' \
-  -X POST \
-  -H 'Content-Type: application/octet-stream' \
-  --data-binary '@/tmp/weixin-demo/report.png.aes.bin'
-```
-
-成功时关键响应头：
+**成功响应头**
 
 ```http
 HTTP/1.1 200 OK
-x-encrypted-param: eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8xIiwic2lnIjoiZG93bmxvYWQifQ==
+x-encrypted-param: AAFFc8c2PXQ5mKPw7rbcH7S1EA=
 ```
 
-处理规则：
+`x-encrypted-param` 就是后续 `CDNMedia.encrypt_query_param` 的值。
 
-- HTTP `200` 且带 `x-encrypted-param`：上传成功。
-- HTTP `4xx`：视为客户端请求错误，不重试。
-- HTTP `5xx` 或其他非 `200`：视为服务端错误，当前实现最多重试 3 次。
-- `200` 但缺少 `x-encrypted-param`：视为失败。
-
-上传成功后，把响应头 `x-encrypted-param` 保存到消息里的 `media.encrypt_query_param`。
-
-### 8.4 CDN 下载与解密
-
-CDN 下载 URL 规则如下：
-
-```text
-GET {cdnBaseUrl}/download?encrypted_query_param={encrypt_query_param}
-```
-
-`curl` 示例：
+**curl 示例**
 
 ```bash
-curl \
-  'https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=eyJmaWxlaWQiOiJjZG5fMTc2MTEzNDQwMDAwMF8xIiwic2lnIjoiZG93bmxvYWQifQ%3D%3D' \
-  --output '/tmp/weixin-demo/report.png.aes.bin'
+curl 'https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=AABQmM4mZ2Yx_d4mcpG4vincN2%3D&filekey=7cc7ad1d6aaf4c32b23dc4f8c40ec0cf' \
+  -X POST \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @/tmp/weixin-photo.enc \
+  -i
 ```
 
-下载到的是密文，需要使用对应的 AES key 解密。当前实现的解密规则如下：
+#### 第四步：把 CDN 引用塞回 `sendmessage`
 
-- 算法：`AES-128-ECB`
-- Padding：`PKCS7`
-- 明文输出：解密后得到原始文件内容
-
-### 8.5 `aes_key` 编码格式
-
-这是媒体协议里最容易踩坑的点。当前实现明确处理了两种编码方式：
-
-| 媒体类型 | JSON 字段示例 | 解释 |
-| --- | --- | --- |
-| 图片 | `"aes_key": "ABEiM0RVZneImaq7zN3u/w=="` | base64 解码后直接得到 16 字节原始 key。 |
-| 文件 / 语音 / 视频 | `"aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY="` | base64 解码后得到 ASCII 文本 `00112233445566778899aabbccddeeff`，再按 hex 解析成 16 字节 key。 |
-
-另外还有一个图片特有字段：
+图片消息示例：
 
 ```json
 {
-  "aeskey": "00112233445566778899aabbccddeeff"
+  "type": 2,
+  "image_item": {
+    "media": {
+      "encrypt_query_param": "AAFFc8c2PXQ5mKPw7rbcH7S1EA=",
+      "aes_key": "MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=",
+      "encrypt_type": 1
+    },
+    "mid_size": 248736
+  }
 }
 ```
 
-当 `image_item.aeskey` 存在时，当前入站下载实现优先使用它，再退回 `image_item.media.aes_key`。
+说明：当前腾讯官方 openclaw 实现对出站媒体统一把 `aes_key` 写成 “base64(hex string)” 形式，即先把 hex 文本当作字节，再 base64。下载方因此必须兼容两种 key 编码形式，见第 8.4 节。
 
-### 8.6 明文下载的例外情况
+### 8.3 下载流程：GET CDN download → AES-128-ECB 解密
 
-对于图片，如果消息里没有 `aeskey` 也没有 `media.aes_key`，当前实现会尝试把 CDN 响应当作明文直接保存，而不是强制解密失败。这说明某些图片流量可能是“有 `encrypt_query_param` 但无额外 AES key”的特殊形态。
+**Method**
+
+`GET`
+
+**URL**
+
+`https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=AAFFc8c2PXQ5mKPw7rbcH7S1EA%3D`
+
+**Body**
+
+无。
+
+**Response**
+
+返回密文二进制内容；客户端自行解密。
+
+**curl 示例**
+
+```bash
+curl 'https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=AAFFc8c2PXQ5mKPw7rbcH7S1EA%3D' \
+  --output /tmp/weixin-photo.enc
+```
+
+解密示例：
+
+```ts
+import { createDecipheriv } from 'node:crypto'
+
+function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
+  const decipher = createDecipheriv('aes-128-ecb', key, null)
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()])
+}
+```
+
+### 8.4 AES key 的两种编码格式
+
+这是媒体处理最容易踩坑的地方。
+
+#### 格式 A：`base64(raw 16 bytes)`
+
+原始 16 字节 key：
+
+```text
+00112233445566778899aabbccddeeff
+```
+
+若按真正二进制字节编码，再 base64：
+
+```text
+ABEiM0RVZneImaq7zN3u/w==
+```
+
+#### 格式 B：`base64(hex string)`
+
+若先把同一个 key 写成 ASCII hex 字符串：
+
+```text
+00112233445566778899aabbccddeeff
+```
+
+再把这 32 个 ASCII 字节做 base64：
+
+```text
+MDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmY=
+```
+
+#### 兼容解码规则
+
+1. 先对 `aes_key` 做 base64 decode。
+2. 如果结果长度是 16 字节，直接当 AES key 用。
+3. 如果结果长度是 32 字节，且内容是 32 个十六进制 ASCII 字符，则再按 hex 解码成 16 字节。
+4. 图片消息若额外带 `image_item.aeskey`，它通常已经是 32 位 hex 字符串，可直接 hex decode，优先级可高于 `media.aes_key`。
+
+### 8.5 各媒体类型的上传/下载差异
+
+| 媒体 | `getuploadurl.media_type` | `MessageItem.type` | 发送差异 | 下载差异 |
+| --- | --- | --- | --- | --- |
+| 图片 | `1` | `2` | 通常填写 `image_item.media` 和 `mid_size`。 | 若同时有 `image_item.aeskey`，优先用它解密。缺少 AES key 时可尝试按明文下载。 |
+| 视频 | `2` | `5` | 填 `video_item.media`、`video_size`，可选 `thumb_media`。 | 一般按 `video_item.media.aes_key` 解密。 |
+| 文件 | `3` | `4` | 不需要缩略图；常填 `file_name`、`len`。 | 按 `file_item.media.aes_key` 解密。 |
+| 语音 | `4` | `3` | 协议支持 VOICE 上传；公开官方实现当前重点覆盖接收/下载，未提供稳定的独立语音发送 helper。 | 常见编码是 `encode_type = 6` 即 SILK，下载解密后可转码成 WAV。 |
+
+### 8.6 缩略图处理
+
+协议字段层面，图片和视频都支持缩略图：
+
+- 上传请求：`thumb_rawsize`、`thumb_rawfilemd5`、`thumb_filesize`
+- 上传响应：`thumb_upload_param`
+- 消息体：`thumb_media`、`thumb_size`、`thumb_width`、`thumb_height`
+
+但需要注意两点：
+
+- 腾讯官方 openclaw v1.0.2 当前默认走 `no_need_thumb: true`，也就是只上传主文件，不上传缩略图。
+- 因此你会在公开发送实现里看到图片/视频消息往往只有 `media`，没有 `thumb_media`。
+
+如果你要完整实现缩略图能力，推荐流程是：
+
+1. 同时准备主文件和缩略图的明文/密文大小与 MD5。
+2. `getuploadurl` 时省略 `no_need_thumb` 或明确传 `false`。
+3. 分别用 `upload_param` 和 `thumb_upload_param` 上传两份密文。
+4. 在 `sendmessage` 中把 `media` 与 `thumb_media` 一起带上。
 
 ## 9. Session 管理
 
-### 9.1 `errcode = -14` 的含义
+### 9.1 Session 过期机制
 
-当前已明确识别出的 session 级错误码只有一个：
+公开实现都把以下任一返回视为 session 失效：
 
-- `errcode = -14`
-- 或者某些情况下 `ret = -14`
+```json
+{
+  "ret": -14,
+  "errcode": -14,
+  "errmsg": "session timeout"
+}
+```
 
-它表示 bot session 已过期，现有 `bot_token` 不再可用。
+失效后应认为当前 `bot_token` 与会话上下文都不再可靠。
 
-### 9.2 当前实现的保护策略
+### 9.2 重登录策略
 
-上游实现对 `-14` 的处理不是“立刻疯狂重试”，而是带保护的暂停策略：
+协议中没有观察到“刷新 token”的独立接口；可行路径就是重新走二维码登录。
 
-1. `getupdates` 检测到 `errcode = -14` 或 `ret = -14`。
-2. 把该账号标记为 paused，暂停时长固定 1 小时。
-3. 监控循环在这 1 小时内不再继续高频轮询。
-4. 出站发送前也会检查 paused 状态；如果还在暂停窗口内，直接拒绝发送。
+推荐处理流程：
 
-这套策略的目的不是修复 session，而是避免 token 已失效时进入热循环。
+1. 停止当前账号的 `getupdates` 循环。
+2. 清理内存中的 `context_token` 缓存。
+3. 清理本地 `get_updates_buf`。
+4. 删除或覆盖旧的凭证文件。
+5. 重新执行 `get_bot_qrcode` → `get_qrcode_status` → `confirmed`。
+6. 用新的 `bot_token`、`baseurl`、`ilink_bot_id` 继续工作。
 
-### 9.3 推荐重连策略
+### 9.3 凭证刷新
 
-从协议角度，`-14` 没有自动 refresh token 接口，因此推荐这样处理：
+“刷新”在这里的含义不是刷新 token，而是**拿到新的登录凭证后覆盖旧凭证**。需要一并更新的字段包括：
 
-1. 停止使用当前 `bot_token` 继续请求。
-2. 重新走第 2 节的二维码登录流程。
-3. 保存新的 `bot_token`、`baseurl`、`ilink_bot_id`、`ilink_user_id`。
-4. 重新启动 `getupdates` 长轮询。
-5. 等待新的入站消息重新建立 `context_token` 缓存。
+- `bot_token`
+- `baseurl`
+- `ilink_bot_id`
+- `ilink_user_id`
+- `savedAt`
 
-关于 `get_updates_buf`，推荐做法如下：
-
-- 如果只是 token 过期，但你的消费状态仍可信，可以继续使用旧游标。
-- 如果重登后服务端上下文发生明显切换，或者你发现旧游标不再可用，就把 `get_updates_buf` 重置为空字符串重新开始。
+如果登录后 `baseurl` 有变化，后续所有 API 和 CDN 调用都应使用新的配置。
 
 ## 10. 完整消息流程图
 
-### 10.1 登录时序
-
 ```mermaid
 sequenceDiagram
-    participant Agent
-    participant API as ilinkai.weixin.qq.com
-    participant WeChat as 微信 App
+    participant U as 微信用户
+    participant W as iLink 服务端
+    participant B as Bot Client
+    participant A as Agent/LLM
 
-    Agent->>API: GET /ilink/bot/get_bot_qrcode?bot_type=3
-    API-->>Agent: { qrcode, qrcode_img_content }
-
-    Note over Agent: 终端渲染二维码或打印 URL
-
-    WeChat->>API: 用户扫码
-    Agent->>API: GET /ilink/bot/get_qrcode_status?qrcode=xxx
-    API-->>Agent: { status: "scaned" }
-
-    WeChat->>API: 用户确认
-    Agent->>API: GET /ilink/bot/get_qrcode_status?qrcode=xxx
-    API-->>Agent: { status: "confirmed", bot_token, ilink_bot_id, ilink_user_id, baseurl }
-
-    Note over Agent: 保存凭证到本地
-```
-
-### 10.2 消息收发循环
-
-```mermaid
-sequenceDiagram
-    participant User as 微信用户
-    participant API as iLink Bot API
-    participant Agent as Agent (本地)
-
-    loop 长轮询循环
-        Agent->>API: POST /ilink/bot/getupdates<br/>{get_updates_buf, base_info}
-        Note over API: 服务器 hold ≤35s
-        API-->>Agent: {msgs[], get_updates_buf}
+    U->>W: 发送文本/图片/语音/文件/视频
+    B->>W: POST /ilink/bot/getupdates\nget_updates_buf=...
+    W-->>B: ret=0, msgs[], context_token, get_updates_buf'
+    B->>B: 持久化 get_updates_buf\n缓存(accountId,userId)->context_token
+    opt 需要 typing
+        B->>W: POST /ilink/bot/getconfig
+        W-->>B: typing_ticket
+        B->>W: POST /ilink/bot/sendtyping status=1
     end
-
-    User->>API: 发送消息 "你好"
-    API-->>Agent: getupdates 返回消息<br/>含 context_token
-
-    opt Typing 状态
-        Agent->>API: POST /ilink/bot/getconfig<br/>{ilink_user_id, context_token}
-        API-->>Agent: {typing_ticket}
-        Agent->>API: POST /ilink/bot/sendtyping<br/>{status: 1}
+    B->>A: 交给 Agent 处理
+    A-->>B: 回复文本或媒体
+    alt 回复文本
+        B->>W: POST /ilink/bot/sendmessage\ncontext_token + TEXT item
+    else 回复媒体
+        B->>W: POST /ilink/bot/getuploadurl
+        W-->>B: upload_param
+        B->>W: POST CDN /upload\nAES-128-ECB ciphertext
+        W-->>B: x-encrypted-param
+        B->>W: POST /ilink/bot/sendmessage\ncontext_token + CDNMedia
     end
-
-    Note over Agent: 处理消息 (调用 LLM 等)
-
-    alt 文本回复
-        Agent->>API: POST /ilink/bot/sendmessage<br/>{msg: {context_token, item_list: [text]}}
-    else 媒体回复
-        Agent->>API: POST /ilink/bot/getuploadurl
-        API-->>Agent: {upload_param}
-        Agent->>API: POST CDN/upload (AES-128-ECB 密文)
-        API-->>Agent: Header: x-encrypted-param
-        Agent->>API: POST /ilink/bot/sendmessage<br/>{msg: {context_token, item_list: [CDNMedia]}}
+    opt 结束 typing
+        B->>W: POST /ilink/bot/sendtyping status=2
     end
-
-    opt 取消 Typing
-        Agent->>API: POST /ilink/bot/sendtyping<br/>{status: 2}
-    end
-
-    API-->>User: 推送回复到微信
-
-    Note over Agent: 立刻发起下一轮 getupdates
-```
-
-### 10.3 Session 过期处理
-
-```mermaid
-flowchart TD
-    A[getupdates 返回 errcode=-14] --> B[停止所有 API 请求]
-    B --> C[清除本地 token]
-    C --> D[重新走 QR 登录流程]
-    D --> E[获取新 bot_token]
-    E --> F[恢复 getupdates 循环]
+    W-->>U: 用户看到回复
 ```
 
 ## 11. 错误码参考表
 
-下表只列出本次从源代码中可以明确确认的返回值与错误状态，不对未观测到的私有错误码做猜测。
+腾讯目前没有公开完整错误码字典；以下是已确认或高频遇到的状态/错误。
 
-| 作用域 | 代码 / 状态 | 含义 | 客户端处理建议 |
+| 层级 | 值 | 含义 | 处理建议 |
 | --- | --- | --- | --- |
-| 所有 CGI JSON 接口 | `ret = 0` 且 `errcode` 缺失或为 `0` | 成功 | 正常处理响应。 |
-| `getupdates` | `errcode = -14` | session 过期 | 停止使用当前 token，重新扫码登录。 |
-| `getupdates` | `ret = -14` | session 过期的另一种返回形态 | 同上。 |
-| 所有 CGI JSON 接口 | `ret != 0` 或 `errcode != 0` 且不为 `-14` | 通用业务失败 | 读取 `errmsg`，短暂重试，连续失败时退避。 |
-| `get_qrcode_status` | `status = expired` | 二维码过期 | 重新请求 `get_bot_qrcode`。 |
-| CDN 上传 | HTTP `4xx` | 请求参数或上传体错误 | 不要盲目重试，先修复请求。 |
-| CDN 上传 | HTTP `5xx` 或非 `200` | CDN 侧瞬时故障 | 可以有限重试；当前实现最多 3 次。 |
-| CDN 上传 | `200` 但缺少 `x-encrypted-param` | 上传不完整 | 视为失败，不要继续 `sendmessage`。 |
-| 本地长轮询 | 客户端 `AbortError` | 本地超时，不代表服务端出错 | 视为一次空轮询，带原游标继续请求。 |
+| QR 轮询 | `status = wait` | 未扫码，或本地把超时等价为继续等待。 | 继续轮询。 |
+| QR 轮询 | `status = scaned` | 已扫码，等待手机端确认。 | 继续轮询。 |
+| QR 轮询 | `status = confirmed` | 登录成功。 | 保存凭证。 |
+| QR 轮询 | `status = expired` | 二维码过期。 | 重新申请二维码。 |
+| 业务接口 | `ret = 0` | 业务成功。 | 正常处理。 |
+| 业务接口 | `errcode = -14` 或 `ret = -14` | session timeout / session expired。 | 清理状态并重新扫码登录。 |
+| 业务接口 | 其他 `ret != 0` / `errcode != 0` | 未公开错误码。 | 原样记录响应体，按失败重试或人工介入。 |
+| CDN 上传 | HTTP 4xx | 请求参数错误、签名无效或上传体不合法。 | 不要盲目重试，先检查 `upload_param`、`filekey`、密文长度和请求头。 |
+| CDN 上传 | HTTP 5xx | CDN 暂时故障。 | 有限重试，建议最多 3 次。 |
+| CDN 上传 | `x-error-message` | CDN 附带错误文本。 | 直接记录到日志。 |
+| 客户端本地 | `AbortError` | 本地超时；对长轮询来说通常不是协议错误。 | 直接发起下一轮轮询。 |
 
-补充说明：
+## 12. 附录：与其他平台对比
 
-- 当前源代码里唯一被显式命名并纳入 session 管理逻辑的业务错误码就是 `-14`。
-- `errmsg` 只在失败时作为辅助诊断字段使用，不能替代 `ret` / `errcode` 判断成功与否。
+| 维度 | Telegram Bot API | Slack API | 微信 iLink Bot API |
+| --- | --- | --- | --- |
+| 收消息方式 | `getUpdates` 或 webhook | Events API / Socket Mode | 目前公开实现主要走 `getupdates` 长轮询 |
+| 发送目标 | `chat_id` | `channel` / `thread_ts` | `to_user_id` + `context_token` |
+| 对话关联主键 | `chat_id` 足够 | `channel` + `thread_ts` | `context_token` 是关键；只有用户 ID 不够 |
+| 主动发消息能力 | 只要知道 `chat_id` 通常即可 | 只要有 scope 与 channel 即可 | 公开实现普遍依赖最近一次入站消息带来的 `context_token` |
+| 媒体上传 | 官方 multipart/form-data | 官方 files/upload API | 先 `getuploadurl`，再走 AES-128-ECB + 独立 CDN |
+| 媒体加密 | 平台托管，调用方少管 | 平台托管，调用方少管 | 调用方自己负责本地加解密 |
+| 输入状态 | sendChatAction | typing indicator | `getconfig` 取 `typing_ticket` 后 `sendtyping` |
+| 协议特征 | 简洁、开放、生态成熟 | 企业协作导向、权限模型复杂 | 对微信会话强绑定，`context_token` 是微信特有设计 |
+
+总结：微信 iLink 的接收方式和 Telegram 的 `getUpdates` 很像，但它的回复模型更像“每条会话消息都附带一次性的回复上下文令牌”。这一点决定了 SDK 设计不能只缓存 `user_id`，还必须缓存并正确回传 `context_token`。
