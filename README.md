@@ -128,7 +128,7 @@ sequenceDiagram
 | 包 | 安装 | 状态 |
 |---|---|---|
 | [@pinixai/weixin-bot](nodejs/) | `npm install @pinixai/weixin-bot` | [![npm](https://img.shields.io/npm/v/@pinixai/weixin-bot)](https://www.npmjs.com/package/@pinixai/weixin-bot) |
-| [weixin-bot-sdk](python/) | `pip install weixin-bot-sdk` | 开发中 |
+| [weixin-bot-sdk](python/) | `pip install weixin-bot-sdk` | [![PyPI](https://img.shields.io/pypi/v/weixin-bot-sdk)](https://pypi.org/project/weixin-bot-sdk/) |
 
 ## License
 
