@@ -1143,72 +1143,85 @@ curl \
 - 如果只是 token 过期，但你的消费状态仍可信，可以继续使用旧游标。
 - 如果重登后服务端上下文发生明显切换，或者你发现旧游标不再可用，就把 `get_updates_buf` 重置为空字符串重新开始。
 
-## 10. 完整消息流程图（ASCII）
+## 10. 完整消息流程图
 
-```text
-┌────────────────────┐
-│ 1. QR 登录         │
-└────────┬───────────┘
-         │ GET /ilink/bot/get_bot_qrcode?bot_type=3
-         v
-┌────────────────────┐
-│ qrcode + image URL │
-└────────┬───────────┘
-         │ GET /ilink/bot/get_qrcode_status?qrcode=...
-         │ Header: iLink-App-ClientVersion: 1
-         v
-┌─────────────────────────────────────────────────────┐
-│ wait / scaned / expired / confirmed                │
-│ confirmed -> bot_token + ilink_bot_id + user_id    │
-│            + baseurl                               │
-└────────┬────────────────────────────────────────────┘
-         │
-         │ POST /ilink/bot/getupdates
-         │ Authorization: Bearer bot_token
-         │ body: { get_updates_buf, base_info }
-         v
-┌─────────────────────────────────────────────────────┐
-│ 2. 入站消息                                          │
-│ msgs[] + context_token + next get_updates_buf      │
-└────────┬────────────────────────────────────────────┘
-         │
-         │ 可选: POST /ilink/bot/getconfig
-         │      body: { ilink_user_id, context_token, base_info }
-         v
-┌─────────────────────────────────────────────────────┐
-│ typing_ticket                                      │
-└────────┬────────────────────────────────────────────┘
-         │
-         │ 生成回复期间每 5s 可发送一次
-         │ POST /ilink/bot/sendtyping status=1
-         v
-┌─────────────────────────────────────────────────────┐
-│ 3. 发送回复                                          │
-└────────┬────────────────────────────────────────────┘
-         │
-         ├─ 文本回复
-         │   POST /ilink/bot/sendmessage
-         │   body.msg.context_token = 入站 context_token
-         │
-         └─ 媒体回复
-             POST /ilink/bot/getuploadurl
-             -> POST {cdn}/upload (AES-128-ECB 密文)
-             -> x-encrypted-param
-             -> POST /ilink/bot/sendmessage 引用 CDNMedia
-         │
-         │ 完成后
-         │ POST /ilink/bot/sendtyping status=2
-         v
-┌─────────────────────────────────────────────────────┐
-│ 4. 下一轮 getupdates                               │
-└─────────────────────────────────────────────────────┘
+### 10.1 登录时序
 
-异常分支：
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant API as ilinkai.weixin.qq.com
+    participant WeChat as 微信 App
 
-getupdates 返回 errcode=-14 / ret=-14
-    -> session 过期
-    -> 暂停请求
-    -> 重新走 QR 登录
+    Agent->>API: GET /ilink/bot/get_bot_qrcode?bot_type=3
+    API-->>Agent: { qrcode, qrcode_img_content }
+
+    Note over Agent: 终端渲染二维码或打印 URL
+
+    WeChat->>API: 用户扫码
+    Agent->>API: GET /ilink/bot/get_qrcode_status?qrcode=xxx
+    API-->>Agent: { status: "scaned" }
+
+    WeChat->>API: 用户确认
+    Agent->>API: GET /ilink/bot/get_qrcode_status?qrcode=xxx
+    API-->>Agent: { status: "confirmed", bot_token, ilink_bot_id, ilink_user_id, baseurl }
+
+    Note over Agent: 保存凭证到本地
+```
+
+### 10.2 消息收发循环
+
+```mermaid
+sequenceDiagram
+    participant User as 微信用户
+    participant API as iLink Bot API
+    participant Agent as Agent (本地)
+
+    loop 长轮询循环
+        Agent->>API: POST /ilink/bot/getupdates<br/>{get_updates_buf, base_info}
+        Note over API: 服务器 hold ≤35s
+        API-->>Agent: {msgs[], get_updates_buf}
+    end
+
+    User->>API: 发送消息 "你好"
+    API-->>Agent: getupdates 返回消息<br/>含 context_token
+
+    opt Typing 状态
+        Agent->>API: POST /ilink/bot/getconfig<br/>{ilink_user_id, context_token}
+        API-->>Agent: {typing_ticket}
+        Agent->>API: POST /ilink/bot/sendtyping<br/>{status: 1}
+    end
+
+    Note over Agent: 处理消息 (调用 LLM 等)
+
+    alt 文本回复
+        Agent->>API: POST /ilink/bot/sendmessage<br/>{msg: {context_token, item_list: [text]}}
+    else 媒体回复
+        Agent->>API: POST /ilink/bot/getuploadurl
+        API-->>Agent: {upload_param}
+        Agent->>API: POST CDN/upload (AES-128-ECB 密文)
+        API-->>Agent: Header: x-encrypted-param
+        Agent->>API: POST /ilink/bot/sendmessage<br/>{msg: {context_token, item_list: [CDNMedia]}}
+    end
+
+    opt 取消 Typing
+        Agent->>API: POST /ilink/bot/sendtyping<br/>{status: 2}
+    end
+
+    API-->>User: 推送回复到微信
+
+    Note over Agent: 立刻发起下一轮 getupdates
+```
+
+### 10.3 Session 过期处理
+
+```mermaid
+flowchart TD
+    A[getupdates 返回 errcode=-14] --> B[停止所有 API 请求]
+    B --> C[清除本地 token]
+    C --> D[重新走 QR 登录流程]
+    D --> E[获取新 bot_token]
+    E --> F[恢复 getupdates 循环]
 ```
 
 ## 11. 错误码参考表
