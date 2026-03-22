@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.js.map
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/

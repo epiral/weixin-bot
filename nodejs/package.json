@@ -1,0 +1,21 @@
+{
+  "name": "@pinix/weixin-bot",
+  "version": "1.0.0",
+  "description": "WeChat iLink Bot SDK for Node.js",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "typescript": "^5.5.4"
+  }
+}
