@@ -1,17 +1,17 @@
-# @pinix/weixin-bot
+# @pinixai/weixin-bot
 
 Zero-dependency Node.js SDK for the WeChat iLink Bot API.
 
 ## Install
 
 ```bash
-npm install @pinix/weixin-bot
+npm install @pinixai/weixin-bot
 ```
 
 ## Quick start
 
 ```typescript
-import { WeixinBot } from '@pinix/weixin-bot'
+import { WeixinBot } from '@pinixai/weixin-bot'
 
 const bot = new WeixinBot()
 await bot.login()
