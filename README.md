@@ -55,28 +55,40 @@ bot.run()
 
 ## 工作原理
 
-```
-你的 Agent                SDK                    微信 iLink Bot API           微信用户
-   │                       │                           │                        │
-   │  bot.login()          │                           │                        │
-   │──────────────────────►│  GET /get_bot_qrcode      │                        │
-   │                       │──────────────────────────►│                        │
-   │                       │  二维码 URL                │                        │
-   │                       │◄──────────────────────────│    用户扫码确认          │
-   │  凭证                  │◄─────────────────────────────────────────────────│
-   │◄──────────────────────│                           │                        │
-   │                       │                           │                        │
-   │  bot.run()            │  POST /getupdates         │                        │
-   │──────────────────────►│──────────────────────────►│  (long-poll ≤35s)      │
-   │                       │                           │                        │
-   │                       │                           │    用户发消息 "你好"     │
-   │                       │  消息 + context_token     │◄───────────────────────│
-   │  onMessage(msg)       │◄──────────────────────────│                        │
-   │◄──────────────────────│                           │                        │
-   │                       │                           │                        │
-   │  bot.reply(msg, text) │  POST /sendmessage        │                        │
-   │──────────────────────►│──────────────────────────►│  推送到微信              │
-   │                       │                           │───────────────────────►│
+```mermaid
+sequenceDiagram
+    participant Agent as 你的 Agent
+    participant SDK as weixin-bot SDK
+    participant API as iLink Bot API
+    participant User as 微信用户
+
+    Note over Agent,User: 1. 登录
+
+    Agent->>SDK: bot.login()
+    SDK->>API: GET /get_bot_qrcode?bot_type=3
+    API-->>SDK: 二维码 URL
+    SDK-->>Agent: 终端显示二维码
+    User->>API: 微信扫码确认
+    API-->>SDK: bot_token + baseurl
+    SDK-->>Agent: 登录成功，凭证已保存
+
+    Note over Agent,User: 2. 收发消息循环
+
+    Agent->>SDK: bot.run()
+
+    loop 长轮询
+        SDK->>API: POST /getupdates (hold ≤35s)
+        User->>API: 发消息 "你好"
+        API-->>SDK: 消息 + context_token
+        SDK-->>Agent: onMessage(msg)
+        Agent->>SDK: bot.sendTyping(userId)
+        SDK->>API: POST /sendtyping
+        Note over User: 显示"对方正在输入中"
+        Agent->>SDK: bot.reply(msg, "Echo: 你好")
+        SDK->>API: POST /sendmessage (带 context_token)
+        API-->>User: 推送回复
+        SDK->>API: POST /sendtyping (取消)
+    end
 ```
 
 ## API
