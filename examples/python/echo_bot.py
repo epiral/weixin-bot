@@ -2,77 +2,106 @@
 """
 WeChat Echo Bot — 完整示例
 
-功能：
-  1. 首次运行扫码登录（终端渲染二维码），凭证自动保存
-  2. 后续运行自动加载已保存凭证，跳过扫码
-  3. 收到消息后显示"正在输入"，然后回复 "Echo: ..."
-  4. Session 过期时自动重新扫码
-
 用法：
-  uv run examples/python/echo_bot.py
-  uv run examples/python/echo_bot.py --force-login
-
-依赖（example 自带，不影响 SDK）：
-  qrcode — 终端二维码渲染
+  uv run echo_bot.py
+  uv run echo_bot.py --force-login
 """
 from __future__ import annotations
 
-import logging
 import sys
 import time
 
 from weixin_bot import WeixinBot
+from weixin_bot.auth import login as _sdk_login, load_credentials, Credentials
 
-# ── 二维码渲染：拦截 SDK 输出的 URL ──────────────────────────────────────
+# ── 带 QR 渲染的登录 ─────────────────────────────────────────────────────
 
-_orig_stderr_write = sys.stderr.write
+async def _login_with_qr(base_url: str, token_path: str | None, force: bool) -> Credentials:
+    """Wrap SDK login to render QR code in terminal."""
+    import asyncio
+    from weixin_bot.api import DEFAULT_BASE_URL, fetch_qr_code, poll_qr_status
 
-def _stderr_hook(s: str) -> int:
-    if s.startswith("https://") and "qrcode=" in s:
-        url = s.strip()
+    if not force:
+        creds = await load_credentials(token_path)
+        if creds is not None:
+            return creds
+
+    base = base_url or DEFAULT_BASE_URL
+
+    while True:
+        qr = await fetch_qr_code(base)
+        url = qr["qrcode_img_content"]
+
+        # Render QR
         try:
-            import qrcode
-            qr = qrcode.QRCode(border=2)
-            qr.add_data(url)
-            qr.make(fit=True)
-            matrix = qr.get_matrix()
+            import qrcode as qrlib
+            q = qrlib.QRCode(border=2)
+            q.add_data(url)
+            q.make(fit=True)
+            matrix = q.get_matrix()
             rows = len(matrix)
             for y in range(0, rows, 2):
                 line = []
                 for x in range(len(matrix[0])):
                     top = matrix[y][x]
                     bot = matrix[y + 1][x] if y + 1 < rows else False
-                    if top and bot:
-                        line.append("█")
-                    elif top and not bot:
-                        line.append("▀")
-                    elif not top and bot:
-                        line.append("▄")
-                    else:
-                        line.append(" ")
-                _orig_stderr_write("".join(line) + "\n")
+                    if top and bot: line.append("█")
+                    elif top: line.append("▀")
+                    elif bot: line.append("▄")
+                    else: line.append(" ")
+                sys.stderr.write("".join(line) + "\n")
         except ImportError:
             pass
-    return _orig_stderr_write(s)
 
-sys.stderr.write = _stderr_hook  # type: ignore[assignment]
+        sys.stderr.write(f"[weixin-bot] 用微信扫描上方二维码，或在微信中打开以下链接:\n{url}\n")
+
+        last_status = None
+        while True:
+            status = await poll_qr_status(base, qr["qrcode"])
+            if status["status"] != last_status:
+                if status["status"] == "scaned":
+                    sys.stderr.write("[weixin-bot] 已扫码，请在微信确认...\n")
+                elif status["status"] == "expired":
+                    sys.stderr.write("[weixin-bot] 二维码已过期，重新获取...\n")
+                last_status = status["status"]
+
+            if status["status"] == "confirmed":
+                from weixin_bot.auth import Credentials as C, _save_credentials_sync
+                import asyncio
+                creds = C(
+                    token=status["bot_token"],
+                    base_url=status.get("baseurl") or base,
+                    account_id=status["ilink_bot_id"],
+                    user_id=status["ilink_user_id"],
+                )
+                await asyncio.to_thread(_save_credentials_sync, creds, token_path)
+                sys.stderr.write("[weixin-bot] 登录成功!\n")
+                return creds
+
+            if status["status"] == "expired":
+                break
+
+            await asyncio.sleep(2)
 
 # ── 日志 ──────────────────────────────────────────────────────────────────
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 def log(level: str, msg: str) -> None:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    logging.info("%s [%s] %s", ts, level, msg)
+    print(f"{ts} [{level}] {msg}")
 
 # ── 启动 ──────────────────────────────────────────────────────────────────
+
+import asyncio
 
 force_login = "--force-login" in sys.argv
 
 bot = WeixinBot(on_error=lambda err: log("ERROR", str(err)))
 
-log("INFO", "强制重新扫码登录..." if force_login else "正在登录（已有凭证则自动跳过扫码）...")
-creds = bot.login(force=force_login)
+# 使用自定义登录（带 QR 渲染）
+log("INFO", "强制重新扫码登录..." if force_login else "正在登录...")
+creds = asyncio.run(_login_with_qr(bot._base_url, bot._token_path, force_login))
+bot._credentials = creds
+bot._base_url = creds.base_url
 log("INFO", f"登录成功 — Bot ID: {creds.account_id}")
 log("INFO", f"关联用户: {creds.user_id}")
 log("INFO", f"API 地址: {creds.base_url}")

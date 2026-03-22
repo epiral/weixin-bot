@@ -3,6 +3,6 @@ name = "weixin-bot-example"
 version = "0.0.0"
 requires-python = ">=3.11"
 dependencies = [
-  "weixin-bot-sdk>=0.1.0",
+  "weixin-bot-sdk>=0.2.0",
   "qrcode>=7.0",
 ]
