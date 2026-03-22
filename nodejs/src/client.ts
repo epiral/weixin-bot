@@ -72,6 +72,8 @@ export class WeixinBot {
   async reply(message: IncomingMessage, text: string): Promise<void> {
     this.contextTokens.set(message.userId, message._contextToken)
     await this.sendText(message.userId, text, message._contextToken)
+    // Auto-cancel typing indicator after reply
+    this.stopTyping(message.userId).catch(() => {})
   }
 
   async sendTyping(userId: string): Promise<void> {
