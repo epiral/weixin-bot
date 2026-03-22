@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 
-import { ApiError, DEFAULT_BASE_URL, buildTextMessage, getUpdates, sendMessage } from './api.js'
+import { ApiError, DEFAULT_BASE_URL, buildTextMessage, getUpdates, sendMessage, getConfig, sendTyping as apiSendTyping } from './api.js'
 import { clearCredentials, loadCredentials, login, type Credentials } from './auth.js'
 import {
   MessageItemType,
@@ -72,6 +72,33 @@ export class WeixinBot {
   async reply(message: IncomingMessage, text: string): Promise<void> {
     this.contextTokens.set(message.userId, message._contextToken)
     await this.sendText(message.userId, text, message._contextToken)
+  }
+
+  async sendTyping(userId: string): Promise<void> {
+    const contextToken = this.contextTokens.get(userId)
+    if (!contextToken) {
+      throw new Error(`No cached context token for user ${userId}. Reply to an incoming message first.`)
+    }
+
+    const credentials = await this.ensureCredentials()
+    const config = await getConfig(this.baseUrl, credentials.token, userId, contextToken)
+    if (!config.typing_ticket) {
+      this.log('sendTyping: no typing_ticket returned by getconfig')
+      return
+    }
+
+    await apiSendTyping(this.baseUrl, credentials.token, userId, config.typing_ticket, 1)
+  }
+
+  async stopTyping(userId: string): Promise<void> {
+    const contextToken = this.contextTokens.get(userId)
+    if (!contextToken) return
+
+    const credentials = await this.ensureCredentials()
+    const config = await getConfig(this.baseUrl, credentials.token, userId, contextToken)
+    if (!config.typing_ticket) return
+
+    await apiSendTyping(this.baseUrl, credentials.token, userId, config.typing_ticket, 2)
   }
 
   async send(userId: string, text: string): Promise<void> {

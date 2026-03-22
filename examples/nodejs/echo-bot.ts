@@ -5,7 +5,7 @@
  * 功能：
  *   1. 首次运行扫码登录，凭证自动保存到 ~/.weixin-bot/credentials.json
  *   2. 后续运行自动加载已保存凭证，跳过扫码
- *   3. 收到微信消息后原样回复 "Echo: ..."
+ *   3. 收到消息后显示"正在输入"，然后回复 "Echo: ..."
  *   4. Session 过期时自动重新扫码
  *
  * 用法：
@@ -52,7 +52,17 @@ bot.onMessage(async (msg) => {
 
   log('RECV', `#${messageCount} | 类型: ${msg.type} | 用户: ${msg.userId}`)
   log('RECV', `内容: ${msg.text}`)
-  log('RECV', `context_token: ${msg._contextToken.slice(0, 20)}...`)
+
+  // 显示"对方正在输入中..."
+  try {
+    await bot.sendTyping(msg.userId)
+    log('TYPING', '已发送 typing 状态')
+  } catch {
+    // typing 失败不影响回复
+  }
+
+  // 模拟处理耗时（实际场景中这里是调用 LLM 等）
+  await new Promise((resolve) => setTimeout(resolve, 1000))
 
   const reply = `Echo: ${msg.text}`
 

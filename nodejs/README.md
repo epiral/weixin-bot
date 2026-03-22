@@ -59,6 +59,14 @@ interface IncomingMessage {
 
 Replies to an inbound message using that message's `context_token`.
 
+### `await bot.sendTyping(userId)`
+
+Shows "对方正在输入中..." (typing indicator) in the WeChat chat. Automatically fetches the required `typing_ticket` via `getconfig`. Only works after the SDK has seen at least one inbound message from that user.
+
+### `await bot.stopTyping(userId)`
+
+Cancels the typing indicator.
+
 ### `await bot.send(userId, text)`
 
 Sends a proactive text message using the latest cached `context_token` for that user. This only works after the SDK has seen at least one inbound message from that user.
