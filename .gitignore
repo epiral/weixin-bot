@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+bin/
+obj/
+*.user
+artifacts/
+*.nupkg
