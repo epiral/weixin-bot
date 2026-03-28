@@ -53,6 +53,28 @@ async def handle(msg):
 bot.run()
 ```
 
+### .NET 9
+
+```bash
+cd dotnet/examples/EchoBot
+dotnet run
+```
+
+```csharp
+using Pinix.WeixinBot;
+
+var bot = new WeixinBot();
+await bot.LoginAsync();
+
+bot.OnMessage(async message =>
+{
+    await bot.SendTypingAsync(message.UserId);
+    await bot.ReplyAsync(message, $"Echo: {message.Text}");
+});
+
+await bot.RunAsync();
+```
+
 ## 工作原理
 
 ```mermaid
@@ -122,6 +144,7 @@ sequenceDiagram
 - [Node.js Echo Bot](examples/nodejs/echo-bot.ts) — 完整示例，含日志和 typing
 - [Node.js 流式测试](examples/nodejs/stream-test.ts) — GENERATING vs FINISH 测试
 - [Node.js Typing 测试](examples/nodejs/generating-test.ts) — sendtyping vs GENERATING 对比
+- [.NET Echo Bot](dotnet/examples/EchoBot/Program.cs) — .NET 9 最小可运行示例
 
 ## 包
 
@@ -129,6 +152,7 @@ sequenceDiagram
 |---|---|---|
 | [@pinixai/weixin-bot](nodejs/) | `npm install @pinixai/weixin-bot` | [![npm](https://img.shields.io/npm/v/@pinixai/weixin-bot)](https://www.npmjs.com/package/@pinixai/weixin-bot) |
 | [weixin-bot-sdk](python/) | `pip install weixin-bot-sdk` | [![PyPI](https://img.shields.io/pypi/v/weixin-bot-sdk)](https://pypi.org/project/weixin-bot-sdk/) |
+| [Pinix.WeixinBot](dotnet/) | `dotnet add reference ./dotnet/src/Pinix.WeixinBot/Pinix.WeixinBot.csproj` | 本地 SDK / `net9.0` |
 
 ## License
 

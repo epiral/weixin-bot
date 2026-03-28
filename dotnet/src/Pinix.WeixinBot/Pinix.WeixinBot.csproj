@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Pinix.WeixinBot</RootNamespace>
+    <PackageId>Pinix.WeixinBot</PackageId>
+    <Authors>Pinix</Authors>
+    <Description>.NET SDK for the WeChat iLink Bot API</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="/" Link="README.md" />
+  </ItemGroup>
+
+</Project>
